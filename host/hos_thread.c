@@ -15,7 +15,14 @@
 #ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION   /* (older Windows SDKs lack it: Windows 10 1803 and later take it) */
 #define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
+#if defined(__x86_64__) || defined(_M_X64)
 #include <emmintrin.h>
+#define HOS_PAUSE() _mm_pause()
+#elif defined(__aarch64__)
+#define HOS_PAUSE() __asm__ volatile("isb")
+#else
+#define HOS_PAUSE() ((void)0)
+#endif
 #ifdef __EMSCRIPTEN__
 #include <sched.h>
 #include <stdatomic.h>
@@ -1073,7 +1080,7 @@ static int present_poll(Ctx *c, int64_t ns) {
     const int64_t end = hos_now_ns() + ns;
     while (v != 1 && hos_now_ns() < end) {
         SwitchToThread();
-        for (int i = 0; i < 64; i++) _mm_pause();
+        for (int i = 0; i < 64; i++) HOS_PAUSE();
         hos_nvn_event_value(ev, &v);
     }
     if (away) hos_vcore_back();

@@ -165,6 +165,11 @@ static uintptr_t sample_pcs[DEPTH];
 static int sample_n;
 
 typedef struct { uintptr_t *pcs; int n, max; uintptr_t rip; int found; } Walk;
+#if defined(__aarch64__)
+#define PROF_PC(u) ((u)->uc_mcontext.pc)
+#else
+#define PROF_PC(u) ((u)->uc_mcontext.gregs[REG_RIP])
+#endif
 static _Unwind_Reason_Code walk_step(struct _Unwind_Context *uc, void *p) {
     Walk *w = (Walk *)p;
     int before = 0;
@@ -182,7 +187,7 @@ static void on_sample(int sig, siginfo_t *si, void *uctx) {
     const int saved = errno;
     if ((int)syscall(SYS_gettid) == sample_tid) {
         const ucontext_t *u = (const ucontext_t *)uctx;
-        const uintptr_t rip = (uintptr_t)u->uc_mcontext.gregs[REG_RIP];
+        const uintptr_t rip = (uintptr_t)PROF_PC(u);
         Walk w = {sample_pcs + 1, 0, DEPTH - 1, rip, 0};
         sample_pcs[0] = rip;
         _Unwind_Backtrace(walk_step, &w);
@@ -394,7 +399,7 @@ static void on_watch(int sig, siginfo_t *si, void *uctx) {
     /* (si_perf_data, the event's sig_data: the watch's index. glibc's siginfo_t has no name for it: the kernel puts it
        after si_addr, at 24) */
     const unsigned long idx = *(const unsigned long *)((const char *)si + 24) & 3;
-    const uint64_t rip = (uint64_t)((const ucontext_t *)uctx)->uc_mcontext.gregs[REG_RIP];
+    const uint64_t rip = (uint64_t)PROF_PC((const ucontext_t *)uctx);
     const uint64_t key = ((uint64_t)(watch_phase & 1) << 62) | ((uint64_t)idx << 58) | rip;
     for (uint32_t i = (uint32_t)((key >> 2) * 2654435761u) & 8191, n = 0; n < 8192; n++, i = (i + 1) & 8191) {
         uint64_t k = __atomic_load_n(&watch_keys[i], __ATOMIC_RELAXED);

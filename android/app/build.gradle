@@ -1,0 +1,29 @@
+// The APK around the game's two libraries (android/README.md). SDL2_SRC: an unpacked SDL2 source release (its Java activity
+// and libSDL2.so are built from it); ADRENOTOOLS_SRC: a libadrenotools checkout with its submodule.
+plugins { id "com.android.application" }
+
+def sdl = System.getenv("SDL2_SRC") ?: project.findProperty("SDL2_SRC")
+def adreno = System.getenv("ADRENOTOOLS_SRC") ?: project.findProperty("ADRENOTOOLS_SRC")
+if (!sdl || !adreno) throw new GradleException("set SDL2_SRC and ADRENOTOOLS_SRC (android/README.md)")
+
+android {
+    namespace "io.github.hookshot"
+    compileSdk 34
+    ndkVersion "27.2.12479018"
+    defaultConfig {
+        applicationId "io.github.hookshot"
+        minSdk 33
+        targetSdk 34
+        versionCode 1
+        versionName "0.1"
+        ndk { abiFilters "arm64-v8a" }
+        externalNativeBuild {
+            cmake { arguments "-DSDL2_SRC=" + sdl, "-DADRENOTOOLS_SRC=" + adreno, "-DANDROID_STL=c++_static" }
+        }
+    }
+    externalNativeBuild { cmake { path "src/main/cpp/CMakeLists.txt" } }
+    sourceSets.main.java.srcDirs += [sdl + "/android-project/app/src/main/java"]
+    // (libadrenotools' hooks are found as files in the app's library folder: the libraries are unpacked at install)
+    packagingOptions { jniLibs { useLegacyPackaging true } }
+    buildTypes { release { signingConfig signingConfigs.debug } }
+}

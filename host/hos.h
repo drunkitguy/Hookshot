@@ -68,6 +68,12 @@ extern uint64_t hos_space_end;   /* web: the guest window ends where the host's 
 #else
 #define HOS_SPACE_END 0x8000000000ULL
 #endif
+#ifdef HOS_ANDROID_SPACE   /* (nx2/build.py, RX_TARGET=android: a smaller window, with A64_HOST_BASE below 1 << 39) */
+#undef HOS_GUEST_SPACE
+#undef HOS_SPACE_END
+#define HOS_GUEST_SPACE HOS_ANDROID_SPACE
+#define HOS_SPACE_END HOS_ANDROID_SPACE
+#endif
 /* (hookshot) host pointer of the n guest bytes at a, NULL unless all of them lie in the guest window. For addresses
    and sizes host code takes from guest memory or arguments before it reads or writes there: GP alone wraps around
    to any host address. */

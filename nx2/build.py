@@ -62,10 +62,18 @@ PGO = os.environ.get("RX_PGO", "")
 # against that root (the AppImage's: glibc 2.35, so the game runs on older systems than the one that built it).
 # HOOKSHOT_VK_PREBUILT=<hookshot_vk.so>: the Vulkan back end as built already (the AppImage's), not compiled here.
 LINUX = not toolchain.windows()   # (hookshot: RX_TARGET=windows on Linux builds the Windows game, with llvm-mingw)
+# (android) RX_TARGET=android: the Linux build's sources for Android arm64 (bionic), as libmain.so and libhookshot_vk.so for an
+# SDL activity's APK (android/README.md). The guest window is 128 GB at 128 GB: Android kernels give a process 39 bits of
+# addresses, which cannot hold the 39-bit window at 16 TB the other targets reserve
+ANDROID = os.environ.get("RX_TARGET", "").lower() == "android"   # (as toolchain.android(): tests stand in for that module)
+# (-fPIC: the game itself is a shared library there, libmain.so)
+ANDROID_DEFS = ["-fPIC", "-DA64_HOST_BASE=0x2000000000ULL", "-DHOS_ANDROID_SPACE=(1ULL<<37)"] if ANDROID else []
 POSIX = os.path.join(kit.HERE, "..", "host", "posix")
 SYSROOT = os.environ.get("HOOKSHOT_SYSROOT", "")
 EXE = "hookshot" if LINUX else "hookshot.exe"
-VK_LIB = "hookshot_vk.so" if LINUX else "hookshot_vk.dll"
+if ANDROID:   # (SDL's activity loads the game as a library)
+    EXE = "libmain.so"
+VK_LIB = "libhookshot_vk.so" if ANDROID else "hookshot_vk.so" if LINUX else "hookshot_vk.dll"
 
 
 def check_vk_symbols(so):
@@ -97,6 +105,8 @@ def check_vk_symbols(so):
         name = parts[1]
         if "@GLIBC" in name or "@CXXABI" in name or "@GLIBCXX" in name or "@GCC" in name:
             continue
+        if ANDROID and (name.split("@")[-1] in ("LIBC", "LIBM", "LIBDL", "LIBLOG") or name.startswith("__android_log_")):
+            continue   # (bionic's, and liblog's, which has no version names)
         bad.append(name)
     if not bad:
         return True
@@ -146,7 +156,7 @@ def HOT_ORDER():
     return linker("/order:@" + p.replace("\\", "/"), "/ignore:4037")
 
 
-HOST_LIBS = ["-lpthread", "-ldl", "-lm"] if LINUX else \
+HOST_LIBS = ["-ldl", "-lm", "-llog", "-latomic"] if ANDROID else ["-lpthread", "-ldl", "-lm"] if LINUX else \
     ["-lwinhttp", "-luser32", "-lwinmm", "-ladvapi32", "-lole32", "-lshell32", "-lgdi32", "-ldbghelp"]
 GPU = os.path.join(kit.HERE, "..", "gpu")
 # FFmpeg (libavcodec's VP8/VP9 decoders, swscale) for nn::codec's video decoders (host/nn_video.c): the static build
@@ -527,7 +537,12 @@ def ffmpeg_linux():
     if pre and os.path.exists(os.path.join(pre, "lib", "libavcodec.a")):
         libs = [os.path.join(pre, "lib", "lib%s.a" % l) for l in FFMPEG_LIBS]
         libs += [os.path.join(pre, "lib", "libdav1d.a")] if os.path.exists(os.path.join(pre, "lib", "libdav1d.a")) else []
-        return ["-I" + os.path.join(pre, "include")], libs + ["-lm", "-lpthread"]
+        return ["-I" + os.path.join(pre, "include")], libs + (["-lm"] if ANDROID else ["-lm", "-lpthread"])
+    if ANDROID:   # (never this PC's FFmpeg, which pkg-config would name; the back end alone needs none)
+        if kit.env_on("RX_VK_ONLY"):
+            return None
+        raise SystemExit("RX_TARGET=android: set HOOKSHOT_FFMPEG to a static FFmpeg built for Android arm64 "
+                         "(lib/libavcodec.a ..., with dav1d: android/README.md)")
     try:
         names = ["lib" + l for l in FFMPEG_LIBS]
         cflags = subprocess.run(["pkg-config", "--cflags"] + names, capture_output=True, text=True, check=True).stdout.split()
@@ -583,13 +598,16 @@ if os.environ.get("RX_MARCH"):
 elif MARCH != "x86-64-v3":
     print("build: this CPU has no AVX2: the game is built for %s (a little slower)" % MARCH, flush=True)
 CPU = ["-march=" + MARCH, "-ffp-contract=off"]
+if ANDROID:   # (the device's CPU, not this PC's: armv8.2-a, Snapdragon 8 Gen 2 and its like; RX_MARCH names another)
+    CPU = ["-march=" + (os.environ.get("RX_MARCH") or "armv8.2-a"), "-ffp-contract=off"] + ANDROID_DEFS
+CX16 = [] if ANDROID else ["-mcx16"]   # (x86's 16-byte compare-and-swap; arm64 has its own, or libatomic's)
 OPT = "O1"   # (the lifted code's level; code_hot.c's is RX_HOT_OPT)
 
 
 def flags(gen, rt64, opt, polls):
     return target() + CPU + [
         "-I" + rt64, "-I" + gen, "-I" + os.path.join(kit.KIT, "rt"), "-I" + NX2_RT, "-Wno-everything",
-        "-fno-strict-aliasing", "-mcx16", "-" + opt, "-g0", "-mllvm", "-rotation-max-header-size=0",
+        "-fno-strict-aliasing"] + CX16 + ["-" + opt, "-g0", "-mllvm", "-rotation-max-header-size=0",
         "-ffunction-sections", "-mllvm", "-capture-tracking-max-uses-to-explore=5000"] + \
         (["-DA64_POLLING"] if polls else []) + WRITE_TRACK
 
@@ -815,7 +833,8 @@ def main():
         host_srcs = sorted(os.path.join(HOST, f) for f in os.listdir(HOST) if f.endswith(".c") and (f != "pgo_rt.c" or PGO == "gen")
                            and not (LINUX and f in ("display.c", "mf_av1.c", "rx_nowgpu.c")) and (f != "rx_nowgpu.c" or not have_wgpu))
         if LINUX:   # (the window on SDL2, the Win32 calls on POSIX, no Media Foundation and no WebGPU renderer)
-            host_srcs += [os.path.join(POSIX, f) for f in ("win32_posix.c", "display_sdl.c", "linux_stubs.c", "prof.c")]
+            host_srcs += [os.path.join(POSIX, f) for f in ("win32_posix.c", "display_sdl.c", "linux_stubs.c", "prof.c") +
+                          (("android_main.c",) if ANDROID else ())]
     else:
         srcs += [os.path.join(NX2_RT, "eden_shim.c"), write_info(out)]
     if kit.env_on("RX_VK_ONLY"):   # (no lift needed: the back end alone)
@@ -852,7 +871,7 @@ def main():
         sum(1 for x in srcs if os.path.basename(x).startswith("code_"))), flush=True)
     # the runtime: ordinary C at -O2, with its own headers (any host/*.h change rebuilds all of it)
     host_fl = target() + CPU + (["-I" + POSIX, "-D_GNU_SOURCE"] if LINUX else []) + \
-        ["-I" + HOST, "-I" + rt64, "-I" + gen, "-Wno-everything", "-O2", "-g0", "-mcx16", "-DA64_POLLING"] + WRITE_TRACK
+        ["-I" + HOST, "-I" + rt64, "-I" + gen, "-Wno-everything", "-O2", "-g0"] + CX16 + ["-DA64_POLLING"] + WRITE_TRACK
     host_deps = deps + b"".join(open(os.path.join(HOST, f), "rb").read() for f in sorted(os.listdir(HOST))
                                 if f.endswith(".h"))
     if LINUX:
@@ -1085,7 +1104,8 @@ def main():
         exe = os.path.join(out, EXE)   # (+ hookshot.map: crash offsets -> f_<guest address>)
         t = time.time()
         # (--export-dynamic-symbol: the window's state, which the Vulkan back end's own Win32 calls read by name)
-        r = subprocess.run([cc] + target() + ["-fuse-ld=lld", "-o", exe] + linker("-Map=" + exe + ".map") +
+        r = subprocess.run([cc] + target() + ["-fuse-ld=lld", "-o", exe] + (["-shared", "-fPIC", "-Wl,-z,global"] if ANDROID else []) +
+                           linker("-Map=" + exe + ".map") +
                            ["-Wl,--gc-sections", "-Wl,--export-dynamic-symbol=hos_posix_*", "@" + rsp] + HOT_ORDER() +
                            (["-fprofile-instr-generate"] if PGO == "gen" else []) +
                            (FFMPEG_LX[1] if FFMPEG_LX else []) + HOST_LIBS,
@@ -1154,8 +1174,9 @@ def main():
         t = time.time()
         if LINUX:   # (its C++ runtime inside: the game folder runs where the AppImage's sysroot is older than the system)
             link = [toolchain.need(toolchain.find("clang++"))] + target() + ["-fuse-ld=lld", "-shared", "-o", vdll] + \
-                linker("-Map=" + vdll + ".map") + ["-Wl,-Bsymbolic", "-Wl,--gc-sections", "-static-libstdc++", "-static-libgcc", "@" + vrsp] + \
-                ([ngx_library(NGX_SDK, True)] if NGX_SDK else []) + ["-ldl", "-lpthread", "-lm"]
+                linker("-Map=" + vdll + ".map") + ["-Wl,-Bsymbolic", "-Wl,--gc-sections", "-static-libstdc++"] + \
+                ([] if ANDROID else ["-static-libgcc"]) + ["@" + vrsp] + \
+                ([ngx_library(NGX_SDK, True)] if NGX_SDK else []) + (["-ldl", "-lm", "-llog"] if ANDROID else ["-ldl", "-lpthread", "-lm"])
         else:
             link = [cc] + toolchain.native_target() + toolchain.native_link() + \
                 ["-shared", "-o", vdll] + linker("/map:" + vdll[:-4] + ".map") + ["@" + vrsp, "-luser32"] +                 (["-lc++", "-lunwind"] if toolchain.mingw() else []) + ngx_link(NGX_SDK, toolchain.mingw())

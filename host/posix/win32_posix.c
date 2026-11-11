@@ -286,10 +286,18 @@ DWORD_PTR SetThreadAffinityMask(HANDLE h, DWORD_PTR mask) {
     if (!t || !mask) { last_error = ERROR_INVALID_PARAMETER; return 0; }
     cpu_set_t old, want;
     CPU_ZERO(&old);
+#ifdef __ANDROID__   /* (bionic: by thread id) */
+    sched_getaffinity(pthread_gettid_np(t->th), sizeof old, &old);
+#else
     pthread_getaffinity_np(t->th, sizeof old, &old);
+#endif
     CPU_ZERO(&want);
     for (int i = 0; i < 64; i++) if (mask >> i & 1) CPU_SET(i, &want);
+#ifdef __ANDROID__
+    if (sched_setaffinity(pthread_gettid_np(t->th), sizeof want, &want)) { last_error = ERROR_INVALID_PARAMETER; return 0; }
+#else
     if (pthread_setaffinity_np(t->th, sizeof want, &want)) { last_error = ERROR_INVALID_PARAMETER; return 0; }
+#endif
     DWORD_PTR r = 0;
     for (int i = 0; i < 64; i++) if (CPU_ISSET(i, &old)) r |= (DWORD_PTR)1 << i;
     return r ? r : 1;
@@ -510,8 +518,16 @@ DWORD WaitForMultipleObjects(DWORD n, const HANDLE *hs, BOOL all, DWORD ms) {
 }
 
 /* ---- fibers ---- */
+#if defined(__ANDROID__) && defined(__aarch64__)
+#include "fiber_arm64.h"   /* (bionic has no makecontext/swapcontext) */
+#define HOS_FIBER_ASM 1
+#endif
 typedef struct {
+#ifdef HOS_FIBER_ASM
+    HosFiberCtx uc;
+#else
     ucontext_t uc;
+#endif
     void *param, *stack;
     size_t stack_size;
     LPFIBER_START_ROUTINE fn;
@@ -532,11 +548,19 @@ BOOL ConvertFiberToThread(void) {
     cur_fiber = NULL;
     return TRUE;
 }
+#ifdef HOS_FIBER_ASM
+static void fiber_start_asm(void *p) {
+    Fiber *f = (Fiber *)p;
+    f->fn(f->param);
+    ExitThread(0);
+}
+#else
 static void fiber_start(unsigned lo, unsigned hi) {
     Fiber *f = (Fiber *)(uintptr_t)((uint64_t)hi << 32 | lo);
     f->fn(f->param);
     ExitThread(0);   /* (a fiber function that returns ends its thread, as on Windows) */
 }
+#endif
 void *CreateFiberEx(SIZE_T commit, SIZE_T reserve, DWORD flags, LPFIBER_START_ROUTINE fn, void *param) {
     (void)flags;
     size_t size = reserve > commit ? reserve : commit;
@@ -547,12 +571,16 @@ void *CreateFiberEx(SIZE_T commit, SIZE_T reserve, DWORD flags, LPFIBER_START_RO
     mprotect(stack, 4096, PROT_NONE);   /* (a guard page at the bottom) */
     Fiber *f = (Fiber *)calloc(1, sizeof *f);
     f->param = param, f->fn = fn, f->stack = stack, f->stack_size = size;
+#ifdef HOS_FIBER_ASM
+    hos_fiber_make(&f->uc, stack, size, fiber_start_asm, f);
+#else
     getcontext(&f->uc);
     f->uc.uc_stack.ss_sp = stack;
     f->uc.uc_stack.ss_size = size;
     f->uc.uc_link = NULL;
     const uint64_t p = (uint64_t)(uintptr_t)f;
     makecontext(&f->uc, (void (*)(void))fiber_start, 2, (unsigned)p, (unsigned)(p >> 32));
+#endif
     return f;
 }
 void *CreateFiber(SIZE_T stack, LPFIBER_START_ROUTINE fn, void *param) { return CreateFiberEx(stack, stack, 0, fn, param); }
@@ -560,7 +588,11 @@ void SwitchToFiber(void *to) {
     Fiber *from = cur_fiber;
     if (!from || from == to) return;
     cur_fiber = (Fiber *)to;
+#ifdef HOS_FIBER_ASM
+    hos_fiber_swap(&from->uc, &((Fiber *)to)->uc);
+#else
     swapcontext(&from->uc, &((Fiber *)to)->uc);
+#endif
 }
 void DeleteFiber(void *p) {
     Fiber *f = (Fiber *)p;
@@ -742,14 +774,27 @@ SIZE_T VirtualQuery(const void *addr, MEMORY_BASIC_INFORMATION *mbi, SIZE_T size
 
 /* ---- modules ---- */
 static void exe_path(char *out, size_t cap) {
+#ifdef __ANDROID__
+    /* (the process is app_process: the game's folder is HOOKSHOT_DIR, host/posix/android_main.c; "hookshot" stands for the
+       executable's name, which callers strip) */
+    const char *dir = getenv("HOOKSHOT_DIR");
+    if (dir && dir[0]) {
+        snprintf(out, cap, "%s/hookshot", dir);
+        return;
+    }
+#endif
     const ssize_t n = readlink("/proc/self/exe", out, cap - 1);
     out[n > 0 ? n : 0] = 0;
 }
 /* a Windows library name, as the Linux one: SDL3.dll -> libSDL3.so.0, SDL2.dll -> libSDL2-2.0.so.0,
    vulkan-1.dll -> libvulkan.so.1, x.dll -> x.so */
 static const char *linux_name(const char *base) {
+#ifdef __ANDROID__   /* (the APK's and the system's names) */
+    static const char *map[][2] = {{"sdl3.dll", "libSDL3.so"}, {"sdl2.dll", "libSDL2.so"}, {"vulkan-1.dll", "libvulkan.so"}};
+#else
     static const char *map[][2] = {{"sdl3.dll", "libSDL3.so.0"}, {"sdl2.dll", "libSDL2-2.0.so.0"},
                                    {"vulkan-1.dll", "libvulkan.so.1"}};
+#endif
     for (size_t i = 0; i < sizeof map / sizeof map[0]; i++)
         if (!strcasecmp(base, map[i][0])) return map[i][1];
     return NULL;
@@ -762,6 +807,33 @@ HMODULE LoadLibraryA(LPCSTR name) {
     char *slash = strrchr(path, '/');
     char *base = slash ? slash + 1 : path;
     const char *mapped = linux_name(base);
+#ifdef __ANDROID__
+    /* (libraries load only from the APK's own folder, by bare name: x.dll beside the game is libx.so there, and the game's
+       folder, shared storage, cannot hold code) */
+    if (!strcasecmp(base, "vulkan-1.dll")) {
+        /* (a custom GPU driver, Turnip: host/posix/android_main.c found one in the game's driver folder. libadrenotools opens
+           the system's Vulkan loader with that driver in place of the device's own; android/README.md) */
+        const char *drv = getenv("HOOKSHOT_VK_DRIVER"), *dir = getenv("HOOKSHOT_VK_DRIVER_DIR"), *libs = getenv("HOOKSHOT_NATIVE_LIB_DIR");
+        if (drv && drv[0] && dir && libs) {
+            void *ad = dlopen("libhookshot_adreno.so", RTLD_NOW);
+            void *(*open_vk)(const char *, const char *, const char *) =
+                ad ? (void *(*)(const char *, const char *, const char *))dlsym(ad, "hookshot_open_vulkan") : NULL;
+            void *vk = open_vk ? open_vk(libs, dir, drv) : NULL;
+            fprintf(stderr, "vk: custom driver %s%s: %s\n", dir, drv, vk ? "loaded" : "NOT loaded, the device's own driver instead");
+            if (vk) return (HMODULE)vk;
+        }
+    }
+    {
+        char bare[NAME_MAX + 8];
+        const size_t bn = strlen(base);
+        if (mapped) snprintf(bare, sizeof bare, "%s", mapped);
+        else if (bn > 4 && !strcasecmp(base + bn - 4, ".dll")) snprintf(bare, sizeof bare, "lib%.*s.so", (int)(bn - 4), base);
+        else snprintf(bare, sizeof bare, "%s", base);
+        HMODULE am = dlopen(bare, RTLD_NOW | RTLD_LOCAL);
+        if (!am) last_error = ERROR_FILE_NOT_FOUND;
+        return am;
+    }
+#endif
     if (mapped) {
         snprintf(base, sizeof path - (size_t)(base - path), "%s", mapped);
     } else {
@@ -807,7 +879,9 @@ DWORD GetModuleFileNameA(HMODULE m, LPSTR out, DWORD cap) {
         if (!path[0]) exe_path(path, sizeof path);
     } else {
         void *lm = NULL;   /* (a handle from LoadLibraryA) */
+#ifdef RTLD_DI_LINKMAP   /* (bionic has no dlinfo) */
         if (dlinfo(m, RTLD_DI_LINKMAP, &lm) == 0 && lm) snprintf(path, sizeof path, "%s", ((const char **)lm)[1]);
+#endif
     }
     if (!cap) return 0;
     const size_t n = strlen(path);
@@ -1094,6 +1168,33 @@ static LPTOP_LEVEL_EXCEPTION_FILTER unhandled;
 static struct sigaction previous[32];
 static pthread_mutex_t handlers_mu = PTHREAD_MUTEX_INITIALIZER;
 
+#if defined(__aarch64__)
+/* (arm64 hosts, Android: the x64 CONTEXT carries pc, sp and fp in Rip, Rsp and Rbp, which is all its readers use) */
+static void context_from(CONTEXT *c, const ucontext_t *uc) {
+    memset(c, 0, sizeof *c);
+    c->Rip = (DWORD64)uc->uc_mcontext.pc, c->Rsp = (DWORD64)uc->uc_mcontext.sp, c->Rbp = (DWORD64)uc->uc_mcontext.regs[29];
+    c->ContextFlags = CONTEXT_FULL;
+}
+static void context_to(ucontext_t *uc, const CONTEXT *c) {
+    uc->uc_mcontext.pc = c->Rip, uc->uc_mcontext.sp = c->Rsp, uc->uc_mcontext.regs[29] = c->Rbp;
+}
+/* 1 if the fault was a write: ESR_EL1's WnR bit, from the esr_context record the kernel puts in __reserved */
+static int fault_is_write(const ucontext_t *uc) {
+    const uint8_t *p = (const uint8_t *)uc->uc_mcontext.__reserved, *end = p + sizeof uc->uc_mcontext.__reserved;
+    while (p + 8 <= end) {
+        uint32_t magic, size;
+        memcpy(&magic, p, 4), memcpy(&size, p + 4, 4);
+        if (!magic || size < 8) break;
+        if (magic == 0x45535201u && p + 16 <= end) {   /* ESR_MAGIC */
+            uint64_t esr;
+            memcpy(&esr, p + 8, 8);
+            return (int)(esr >> 6 & 1);
+        }
+        p += size;
+    }
+    return 0;
+}
+#else
 static void context_from(CONTEXT *c, const ucontext_t *uc) {
     const greg_t *g = uc->uc_mcontext.gregs;
     c->Rax = (DWORD64)g[REG_RAX], c->Rcx = (DWORD64)g[REG_RCX], c->Rdx = (DWORD64)g[REG_RDX], c->Rbx = (DWORD64)g[REG_RBX];
@@ -1110,6 +1211,8 @@ static void context_to(ucontext_t *uc, const CONTEXT *c) {
     g[REG_R12] = (greg_t)c->R12, g[REG_R13] = (greg_t)c->R13, g[REG_R14] = (greg_t)c->R14, g[REG_R15] = (greg_t)c->R15;
     g[REG_RIP] = (greg_t)c->Rip;
 }
+static int fault_is_write(const ucontext_t *uc) { return (uc->uc_mcontext.gregs[REG_ERR] & 2) ? 1 : 0; }
+#endif
 static void on_signal(int sig, siginfo_t *si, void *uctx) {
     ucontext_t *uc = (ucontext_t *)uctx;
     EXCEPTION_RECORD rec;
@@ -1122,7 +1225,7 @@ static void on_signal(int sig, siginfo_t *si, void *uctx) {
     rec.ExceptionAddress = (void *)(uintptr_t)ctx.Rip;
     if (sig == SIGSEGV || sig == SIGBUS) {
         rec.NumberParameters = 2;
-        rec.ExceptionInformation[0] = (uc->uc_mcontext.gregs[REG_ERR] & 2) ? 1 : 0;   /* (1: a write) */
+        rec.ExceptionInformation[0] = fault_is_write(uc);   /* (1: a write) */
         rec.ExceptionInformation[1] = (ULONG_PTR)si->si_addr;
     }
     EXCEPTION_POINTERS ep = {&rec, &ctx};
@@ -1245,8 +1348,13 @@ int MessageBoxA(HWND w, LPCSTR text, LPCSTR caption, UINT type) {
     (void)w, (void)type;
     fprintf(stderr, "%s: %s\n", caption ? caption : "Hookshot", text ? text : "");
     typedef int (*ShowFn)(uint32_t, const char *, const char *, void *);   /* (SDL3's and SDL2's alike; its result unread) */
+#ifdef __ANDROID__
+    void *sdl = dlopen("libSDL3.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!sdl) sdl = dlopen("libSDL2.so", RTLD_NOW | RTLD_NOLOAD);
+#else
     void *sdl = dlopen("libSDL3.so.0", RTLD_NOW | RTLD_NOLOAD);
     if (!sdl) sdl = dlopen("libSDL2-2.0.so.0", RTLD_NOW | RTLD_NOLOAD);
+#endif
     ShowFn show = sdl ? (ShowFn)dlsym(sdl, "SDL_ShowSimpleMessageBox") : NULL;
     if (show) show(0x10, caption ? caption : "Hookshot", text ? text : "", NULL);
     return 1;
