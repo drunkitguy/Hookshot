@@ -7,6 +7,7 @@ if(SDL2_SRC)   # (not given: the adrenotools part alone, as tests build it)
     set(SDL_SHARED ON CACHE BOOL "" FORCE)
     set(SDL_STATIC OFF CACHE BOOL "" FORCE)
     set(SDL_TEST OFF CACHE BOOL "" FORCE)
+    set(SDL_CMAKE_DEBUG_POSTFIX "" CACHE STRING "" FORCE)   # (libSDL2.so in a debug build too: the activity loads it by that name)
     add_subdirectory(${SDL2_SRC} sdl2)   # (a plain target: Gradle packages the libraries of the targets it builds)
 endif()
 
