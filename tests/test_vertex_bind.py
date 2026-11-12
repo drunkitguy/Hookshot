@@ -32,6 +32,8 @@ def main():
     look = streams.index("gpu_buffer_bind(")
     if ask > look:
         raise SystemExit("vertex streams look the pool up before checking the stream already bound")
+    if "r.buffer == cur->stream" not in streams[look:]:
+        raise SystemExit("a vertex stream copied into the recording's stream is kept for later recordings")
     made = block(mem, "bool mirror_make(Pool& pool) {")
     on = made.index("p->mstate = Pool::MIRROR_ON;")
     if "pools_gen.fetch_add" not in made[on:on + 240]:

@@ -125,6 +125,7 @@ BufferRef gpu_buffer(uint64_t gpu, uint64_t size);   // (empty when no pool hold
 /// imported pool. written: the GPU may write it (copied back to guest memory at the submission's end).
 BufferRef gpu_buffer_bind(uint64_t gpu, uint64_t size, bool written);
 BufferRef stream_copy(const void* src, uint64_t n);   // vk_draw.cpp: bytes in the recording's stream, as a binding
+BufferRef stream_copy_guest(uint64_t gpu, uint64_t n);   // vk_draw.cpp: guest memory as submitted, in the recording's stream
 /// Authored constants in the recording's stream: never recycled until its recording completes.
 /// Fill mapped, then flush memory through binding.offset + binding.size before GPU use.
 struct UniformUpload {

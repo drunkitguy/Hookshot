@@ -53,6 +53,17 @@ static void publish_cap_ranges() { throw std::runtime_error("unexpected mirror p
 static void logf(const char*, ...) {}
 static bool import_in_background(uint64_t, uint64_t) { throw std::runtime_error("unexpected asynchronous import"); }
 static BufferRef stream_copy(const uint8_t*, uint64_t) { throw std::runtime_error("unexpected streaming copy"); }
+static bool copy_reads = false;   // (RX_VK_COPY_READS: guest memory not imported)
+static unsigned copies;
+static bool copy_reads_on() { return copy_reads; }
+static constexpr uint64_t kCopyReadMax = 8ull << 20;
+static std::atomic<int64_t> st_copy_reads{0}, st_copy_read_kb{0};
+static constexpr VkBuffer kStreamBuffer = 77;
+static BufferRef stream_copy_guest(uint64_t, uint64_t n) {
+    if (!copy_reads) throw std::runtime_error("unexpected copied read");
+    ++copies;
+    return {kStreamBuffer, 256u * copies, n, 0};
+}
 static const uint8_t* gpu_ptr(uint64_t, uint64_t* avail) {
     *avail = mapping_valid ? 4ull << 20 : 0;
     return mapping_valid ? reinterpret_cast<const uint8_t*>(&pool) : nullptr;
@@ -106,16 +117,24 @@ int main(int argc, char** argv) {
         else if (mode == "mirror_pending") pool.mstate = Pool::MIRROR_WANTED;
         else if (mode == "mirror_on") pool.mstate = Pool::MIRROR_ON;
         else if (mode == "invalid_pool") have_pool = false;
+        else if (mode == "copied_read") have_pool = false, copy_reads = true;
         else if (mode == "invalid_mapping") mapping_valid = false, gpu = virtual_base + 4092;
         else throw std::runtime_error("unknown fixture case");
         if (mode == "virtual_write") gpu = virtual_base + 4092;
         if (mode == "large_write") size = (1u << 20) + 4;
         if (mode == "no_recording") mem_rec_value = 0;
-        const bool written = mode != "readonly";
+        const bool written = mode != "readonly" && mode != "copied_read";
         const BufferRef ref = gpu_buffer_bind(gpu, size, written);
         require(hazards == (mode == "mirror_on" ? 1u : 0u), "changed mirrored-write hazard notification");
         if (hazards) require(hazard_lo == guest && hazard_hi == guest + size, "changed mirrored-write hazard range");
-        if (mode == "invalid_pool" || mode == "invalid_mapping") {
+        if (mode == "copied_read") {
+            require(ref.buffer == kStreamBuffer && ref.size == size && copies == 1, "a read no pool holds was not copied");
+            require(gpu_buffer_bind(gpu, size, false).buffer == kStreamBuffer && copies == 2,
+                    "a copied read was remembered (its stream is the recording's)");
+            require(!gpu_buffer_bind(gpu, size, true) && copies == 2, "a write no pool holds was copied");
+            require(!pool.last_value && writebacks.empty(), "a copied read changed pool bookkeeping");
+            page_state(guest, size, false);
+        } else if (mode == "invalid_pool" || mode == "invalid_mapping") {
             require(!ref && !pool.last_value && !pool.direct_write_epoch && writebacks.empty(),
                     "invalid binding changed pool bookkeeping");
             page_state(guest, size, false);
@@ -144,7 +163,7 @@ int main(int argc, char** argv) {
                 require(writebacks.empty() && !synced, "direct binding entered mirror writeback path");
             }
         }
-        require(texture_writes == (written ? 1u : 0u), "changed existing texture write notification");
+        require(texture_writes == (written || mode == "copied_read" ? 1u : 0u), "changed existing texture write notification");
         require(!st_async_copies, "unexpected asynchronous streaming copy");
         require(!made, "unexpected mirror allocation attempt");
         const bool forgot = written && have_pool && mapping_valid && (!mirrors || !mirror_upload || mode == "refused");

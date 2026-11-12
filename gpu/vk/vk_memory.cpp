@@ -2775,6 +2775,26 @@ void note_direct_write(Pool& p, uint64_t off, uint64_t size) {   // (pools_mu he
         wb_pages_note(p.lo + off, p.lo + std::min(off + size, p.hi - p.lo), mem_rec_value);
 }
 
+// (hookshot) A read no pool holds: the guest's bytes as the submission had them, copied into the recording's stream. On by itself
+// where guest memory is not imported at all (Android, Qualcomm's own driver: no host-pointer import, libadrenotools' never took,
+// and every indexed draw was left out: a black screen); RX_VK_COPY_READS=0 / 1: off / on. GPU writes to guest memory still have
+// nowhere to go. shortcut: a copy per binding, up to 8 MB; a pool of the GPU's own memory kept in step with the guest's when it is slow
+bool copy_reads_on() {
+    static const char* e = getenv("RX_VK_COPY_READS");
+    bool on = false;
+#ifdef __ANDROID__
+    on = via_adreno && adreno_dead;
+#endif
+    if (e) on = atoi(e) != 0;
+    static std::atomic<bool> said{false};
+    if (on && !said.exchange(true))
+        logf("vk: guest memory not imported: the GPU's reads of it copied into the recordings' streams (%s); its writes left out",
+             e ? "RX_VK_COPY_READS" : "RX_VK_COPY_READS=0: off");
+    return on;
+}
+constexpr uint64_t kCopyReadMax = 8ull << 20;
+std::atomic<int64_t> st_copy_reads{0}, st_copy_read_kb{0};
+
 BufferRef gpu_buffer_bind(uint64_t gpu, uint64_t size, bool written) {
     if (written) texture_gpu_wrote(gpu, size);
     // (below 1 TB a GPU address is the guest address itself, and a pool holds the whole range or nothing: the host's
@@ -2813,7 +2833,7 @@ BufferRef gpu_buffer_bind(uint64_t gpu, uint64_t size, bool written) {
             return remember({p->mirror, off, size, 0});
     }
     ParLock plk;   // (before pools_mu, always: a mirror sync records into the shared upload command buffer)
-    std::lock_guard lk(pools_mu);
+    std::unique_lock lk(pools_mu);
     {   // (hookshot, smoothness: import_in_background above. Reads up to 4 MB; not in a parallel replay's segment)
         static const bool async_import = [] { const char* e = getenv("RX_VK_ASYNC_IMPORT"); return e && atoi(e) != 0; }();
         if (async_import && !written && !par && size <= (4u << 20) && guest < (1ull << 40) &&
@@ -2828,6 +2848,15 @@ BufferRef gpu_buffer_bind(uint64_t gpu, uint64_t size, bool written) {
         }
     }
     Pool* p = pool_of(guest, size);
+    if (!p && !written && size && size <= kCopyReadMax && copy_reads_on()) {
+        lk.unlock();   // (memory_read_as_submitted takes pools_mu)
+        const BufferRef r = stream_copy_guest(gpu, size);
+        if (r && ++st_copy_reads % 20000 == 1)
+            logf("vk: reads of guest memory copied into the streams: %lld (%lld MB)", (long long)st_copy_reads.load(),
+                 (long long)(st_copy_read_kb.load() >> 10));
+        if (r) st_copy_read_kb += (int64_t)(size >> 10);
+        return r;
+    }
     if (!p) return {};
     tl = {p, pools_gen.load(std::memory_order_relaxed)};
     if (p->last_value < mem_rec_value) p->last_value = mem_rec_value;

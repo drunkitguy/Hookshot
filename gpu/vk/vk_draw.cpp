@@ -6879,7 +6879,8 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
                 r = kept_vb[b].ref;
             else {
                 r = gpu_buffer_bind(vb_addr, vb_size, false);
-                kept_vb[b] = {vb_addr, vb_size, gpu_bind_stamp(), r, r ? 1 : 0};
+                // (a copy into the recording's stream is never kept: the stamp outlives the recording, and its stream with it)
+                kept_vb[b] = {vb_addr, vb_size, gpu_bind_stamp(), r, r && !(cur && r.buffer == cur->stream) ? 1 : 0};
             }
             if (!r) {
                 complete = false;
@@ -9046,6 +9047,27 @@ BufferRef stream_copy(const void* src, uint64_t n) {
     const uint64_t at = stream_alloc(n, align);
     if (at == UINT64_MAX) return {};
     std::memcpy(cur->mapped + at, src, n);
+    return {cur->stream, at, n, 0};
+}
+/// (hookshot) n bytes of guest memory at gpu, as the submission had them, copied into the recording's stream (vk_memory.cpp
+/// gpu_buffer_bind: a read no pool holds, RX_VK_COPY_READS); empty when there is no recording, no room or the range is unreadable
+BufferRef stream_copy_guest(uint64_t gpu, uint64_t n) {
+    ParLock lk;
+    if (!cur || !n) return {};
+    // (RX_VK_COPY_READS_MB: copies only while the recording's streams hold less than this, 64 MB by default; past it the reads are
+    // left out, as without the copies)
+    static const uint64_t budget = (getenv("RX_VK_COPY_READS_MB") ? (uint64_t)std::max(1, atoi(getenv("RX_VK_COPY_READS_MB"))) : 64u) << 20;
+    if (cur->before + cur->used + n > budget) {
+        static std::atomic<bool> said{false};
+        if (!said.exchange(true))
+            logf("vk: copied reads: the recording's %llu MB budget is spent, draws left out (RX_VK_COPY_READS_MB)",
+                 (unsigned long long)(budget >> 20));
+        return {};
+    }
+    const uint64_t align = std::max<uint64_t>({256, dev.props.limits.minUniformBufferOffsetAlignment,
+                                               dev.props.limits.minStorageBufferOffsetAlignment});
+    const uint64_t at = stream_alloc(n, align);
+    if (at == UINT64_MAX || !memory_read_as_submitted(gpu, cur->mapped + at, n)) return {};
     return {cur->stream, at, n, 0};
 }
 

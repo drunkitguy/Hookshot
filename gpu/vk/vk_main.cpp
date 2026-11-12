@@ -13,6 +13,11 @@
 #include <string>
 #include <thread>
 #include <vector>
+#ifdef __ANDROID__
+#include <cerrno>
+#include <fcntl.h>
+#include <unistd.h>
+#endif
 
 #include "vk_api.h"
 #include "vk_draw.h"
@@ -230,6 +235,19 @@ bool create_device() {
     std::vector<VkExtensionProperties> exts(n);
     vkEnumerateDeviceExtensionProperties(dev.physical, nullptr, &n, exts.data());
     std::vector<const char*> want = {VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+#ifdef __ANDROID__
+    {   // (android: what the device offers for the guest memory besides a host-pointer import, for its next design; once)
+        const int heap = open("/dev/dma_heap/system", O_RDONLY | O_CLOEXEC);
+        const int heap_errno = errno;
+        if (heap >= 0) close(heap);
+        auto has = [&](const char* name) { return has_extension(exts, name) ? "yes" : "no"; };
+        logf("vk: guest memory options: VK_EXT_external_memory_dma_buf %s, VK_KHR_external_memory_fd %s, "
+             "VK_ANDROID_external_memory_android_hardware_buffer %s, VK_EXT_queue_family_foreign %s; /dev/dma_heap/system %s (errno %d)",
+             has("VK_EXT_external_memory_dma_buf"), has("VK_KHR_external_memory_fd"),
+             has("VK_ANDROID_external_memory_android_hardware_buffer"), has("VK_EXT_queue_family_foreign"),
+             heap >= 0 ? "opens" : "does not open", heap >= 0 ? 0 : heap_errno);
+    }
+#endif
     auto optional = [&](const char* name, bool& flag) {
         flag = has_extension(exts, name);
         if (flag) want.push_back(name);
