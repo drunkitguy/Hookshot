@@ -4,8 +4,10 @@ cmake_minimum_required(VERSION 3.22)
 project(hookshot_android LANGUAGES C CXX)
 
 if(SDL2_SRC)   # (not given: the adrenotools part alone, as tests build it)
-    add_subdirectory(${SDL2_SRC} sdl2 EXCLUDE_FROM_ALL)
-    add_custom_target(hookshot_sdl ALL DEPENDS SDL2)
+    set(SDL_SHARED ON CACHE BOOL "" FORCE)
+    set(SDL_STATIC OFF CACHE BOOL "" FORCE)
+    set(SDL_TEST OFF CACHE BOOL "" FORCE)
+    add_subdirectory(${SDL2_SRC} sdl2)   # (a plain target: Gradle packages the libraries of the targets it builds)
 endif()
 
 add_subdirectory(${ADRENOTOOLS_SRC} adrenotools)

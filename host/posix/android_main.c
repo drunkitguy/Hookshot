@@ -17,9 +17,12 @@
 
 int main(int argc, char **argv);   /* (hos_main.c) */
 
+/* (by SDL's own handle: the activity loaded it with System.loadLibrary, which RTLD_DEFAULT does not search from here) */
 static const char *sdl_path(const char *sdl2, const char *sdl3) {
-    const char *(*fn)(void) = (const char *(*)(void))dlsym(RTLD_DEFAULT, sdl2);
-    if (!fn) fn = (const char *(*)(void))dlsym(RTLD_DEFAULT, sdl3);
+    void *sdl = dlopen("libSDL2.so", RTLD_NOW);
+    if (!sdl) sdl = dlopen("libSDL3.so", RTLD_NOW);
+    const char *(*fn)(void) = sdl ? (const char *(*)(void))dlsym(sdl, sdl2) : NULL;
+    if (!fn && sdl) fn = (const char *(*)(void))dlsym(sdl, sdl3);
     return fn ? fn() : NULL;
 }
 

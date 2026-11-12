@@ -4,12 +4,14 @@ plugins { id "com.android.application" }
 
 def sdl = System.getenv("SDL2_SRC") ?: project.findProperty("SDL2_SRC")
 def adreno = System.getenv("ADRENOTOOLS_SRC") ?: project.findProperty("ADRENOTOOLS_SRC")
+// ANDROID_NDK_HOME: the NDK the game's libraries were built with, used as it is (else the SDK's own copy of r27c)
+def ndk = System.getenv("ANDROID_NDK_HOME")
 if (!sdl || !adreno) throw new GradleException("set SDL2_SRC and ADRENOTOOLS_SRC (android/README.md)")
 
 android {
     namespace "io.github.hookshot"
     compileSdk 34
-    ndkVersion "27.2.12479018"
+    if (ndk) { ndkPath = ndk } else { ndkVersion = "27.2.12479018" }
     defaultConfig {
         applicationId "io.github.hookshot"
         minSdk 33

@@ -1,0 +1,8 @@
+# (the game's libraries and everything built from them stay on this PC)
+.gradle/
+build/
+app/build/
+app/.cxx/
+app/src/main/jniLibs/
+local.properties
+*.apk
