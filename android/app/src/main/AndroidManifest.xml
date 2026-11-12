@@ -5,13 +5,17 @@
     <uses-permission android:name="android.permission.VIBRATE" />
     <application android:label="Hookshot" android:hasCode="true" android:extractNativeLibs="true"
         android:largeHeap="true" android:isGame="true" android:appCategory="game">
-        <activity android:name=".HookshotActivity" android:exported="true" android:screenOrientation="sensorLandscape"
-            android:launchMode="singleInstance" android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
-            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation">
+        <!-- the start screen: the player's .nup (unpacked once), the GPU driver, the last run's log -->
+        <activity android:name=".LauncherActivity" android:exported="true" android:screenOrientation="sensorLandscape"
+            android:theme="@android:style/Theme.DeviceDefault.NoActionBar"
+            android:configChanges="orientation|screenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <activity android:name=".HookshotActivity" android:exported="false" android:screenOrientation="sensorLandscape"
+            android:launchMode="singleInstance" android:theme="@android:style/Theme.NoTitleBar.Fullscreen"
+            android:configChanges="layoutDirection|locale|orientation|uiMode|screenLayout|screenSize|smallestScreenSize|keyboard|keyboardHidden|navigation" />
     </application>
 </manifest>

@@ -14,3 +14,10 @@ endif()
 add_subdirectory(${ADRENOTOOLS_SRC} adrenotools)
 add_library(hookshot_adreno SHARED hookshot_adreno.cpp)
 target_link_libraries(hookshot_adreno PRIVATE adrenotools)
+
+# the start screen's .nup unpack (nup_extract.c), with the repository's zstd decoder
+set(ZSTD ${CMAKE_CURRENT_SOURCE_DIR}/../../../../../third_party/zstd/lib)
+file(GLOB ZSTD_SRC ${ZSTD}/common/*.c ${ZSTD}/decompress/*.c)
+add_library(hookshot_setup SHARED nup_extract.c ${ZSTD_SRC})
+target_include_directories(hookshot_setup PRIVATE ${ZSTD})
+target_compile_definitions(hookshot_setup PRIVATE ZSTD_DISABLE_ASM)
