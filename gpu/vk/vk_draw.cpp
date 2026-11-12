@@ -1179,9 +1179,17 @@ VkResult guarded_graphics(VkPipelineCache cache, const VkGraphicsPipelineCreateI
         logf("vk: the driver faulted compiling a graphics pipeline: that one is left out");
         return (VkResult)-77;
     }
+#ifdef __ANDROID__
+    // (only where nothing waits on the build: the start's precompile and preparation threads, compile_gated; never a probe)
+    const bool gated = compile_gated && !(ci->flags & VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT);
+    if (gated) compile_gate();
+#endif
     fault_armed = 1;
     const VkResult r = vkCreateGraphicsPipelines(dev.device, cache, 1, ci, nullptr, pl);
     fault_armed = 0;
+#ifdef __ANDROID__
+    if (gated) compile_finished();
+#endif
     return r;
 }
 VkResult guarded_compute(VkPipelineCache cache, const VkComputePipelineCreateInfo* ci, VkPipeline* pl) {
@@ -1192,9 +1200,16 @@ VkResult guarded_compute(VkPipelineCache cache, const VkComputePipelineCreateInf
         logf("vk: the driver faulted compiling a compute pipeline: that one is left out");
         return (VkResult)-77;
     }
+#ifdef __ANDROID__
+    const bool gated = compile_gated && !(ci->flags & VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT);
+    if (gated) compile_gate();
+#endif
     fault_armed = 1;
     const VkResult r = vkCreateComputePipelines(dev.device, cache, 1, ci, nullptr, pl);
     fault_armed = 0;
+#ifdef __ANDROID__
+    if (gated) compile_finished();
+#endif
     return r;
 }
 #endif
@@ -1671,6 +1686,7 @@ void state_list_prepare(void (*progress)(size_t done, size_t total), bool open_s
     std::atomic<size_t> next{0}, made{0}, missing{0};
     const auto worker = [&] {
         ub_thread_off();   // (a background thread: see ub_thread_off; the pipeline state list's builds raced the replay's updates)
+        compile_gated = true;   // (nothing waits on this thread's builds: compile_gate may hold them)
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
         for (;;) {
             const size_t i = next++;
@@ -1714,6 +1730,7 @@ void state_list_prepare(void (*progress)(size_t done, size_t total), bool open_s
     std::atomic<size_t> variants_made{0};
     next = 0;
     const auto variant_worker = [&] {
+        compile_gated = true;   // (nothing waits on this thread's builds: compile_gate may hold them)
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
         for (;;) {
             const size_t i = next++;
@@ -7721,6 +7738,7 @@ bool warm_libraries(void (*progress)(size_t done, size_t total)) {
     };
     const auto worker = [&] {
         ub_thread_off();   // (a background thread: see ub_thread_off)
+        compile_gated = true;   // (nothing waits on this thread's builds: compile_gate may hold them)
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);   // (as prepare_run's, and half the CPUs)
         for (;;) {
             if (prepare_stopped()) return;
@@ -7869,6 +7887,7 @@ bool prepare_run(void (*progress)(size_t done, size_t total), bool background, b
     };
     const auto worker = [&] {
         ub_thread_off();   // (a background thread: see ub_thread_off)
+        compile_gated = true;   // (nothing waits on this thread's builds: compile_gate may hold them)
         // (below normal, and half the CPUs, below: on all of them at High the driver's compiles froze the whole PC)
         SetThreadPriority(GetCurrentThread(), background ? THREAD_PRIORITY_IDLE : THREAD_PRIORITY_BELOW_NORMAL);
         for (;;) {
@@ -8005,6 +8024,17 @@ void precompile_run(void (*progress)(size_t done, size_t total)) {
         std::lock_guard lk(state_mu);
         if (!state_file) state_open_locked();
     }
+#ifdef __ANDROID__
+    {   // (android: the first RX_VK_PRECOMPILE_MAX noted (300), the title's and the intro's, before play; the rest are built as play
+        // meets them. All 1049 one at a time would hold the title back ~15 minutes. After notes_open_locked, which keeps them all as
+        // known: given the capped list, play noted the rest again, ~750 more lines in the file every start)
+        const size_t cap = getenv("RX_VK_PRECOMPILE_MAX") ? (size_t)std::max(0, atoi(getenv("RX_VK_PRECOMPILE_MAX"))) : 300;
+        if (notes.size() > cap) {
+            logf("vk: precompile: the first %zu of %zu noted pipelines (RX_VK_PRECOMPILE_MAX); the rest in play", cap, notes.size());
+            notes.resize(cap);
+        }
+    }
+#endif
     std::unordered_set<uint64_t> wanted;
     for (const auto& n : notes) wanted.insert(n->prog);
     // (the compute programs: those play dispatched (hookshot_computes.bin), or every kept one when there is no list yet)
@@ -8040,6 +8070,7 @@ void precompile_run(void (*progress)(size_t done, size_t total)) {
     auto& done = pre->done;
     const auto worker = [pre, total] {
         ub_thread_off();   // (a background thread: see ub_thread_off)
+        compile_gated = true;   // (nothing waits on this thread's builds: compile_gate may hold them)
         auto& notes = pre->notes;
         auto& computes = pre->computes;
         auto& fallbacks = pre->fallbacks;
@@ -8099,7 +8130,7 @@ void precompile_run(void (*progress)(size_t done, size_t total)) {
     };
     std::vector<std::thread> threads;
     const unsigned cpus = usable_cpus();
-    for (unsigned i = 0; i < std::min(cpus, 64u); i++) threads.emplace_back(worker);
+    for (unsigned i = 0; i < compile_threads(std::min(cpus, 64u)); i++) threads.emplace_back(worker);
     static const int stall_s = getenv("RX_VK_PRECOMPILE_STALL_S") ? atoi(getenv("RX_VK_PRECOMPILE_STALL_S")) : 30;
     size_t last_done = 0;
     auto last_change = std::chrono::steady_clock::now();
@@ -8243,6 +8274,7 @@ void predict_run(void (*progress)(size_t done, size_t total)) {
     static const int budget_s = getenv("RX_VK_PREDICT_S") ? atoi(getenv("RX_VK_PREDICT_S")) : 0;
     const auto worker = [pre, t0] {
         ub_thread_off();   // (a background thread: see ub_thread_off)
+        compile_gated = true;   // (nothing waits on this thread's builds: compile_gate may hold them)
         driver_cache_only = true;
         for (;;) {
             if (prepare_stopped() || pre->abandoned.load()) return;

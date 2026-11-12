@@ -326,7 +326,12 @@ unsigned usable_cpus();   // vk_progcache.cpp
 /// (hookshot) Half the PC's CPUs (one a core where a core runs two threads: the translation's and the stage libraries' workers, at
 /// below normal priority), and never more than usable_cpus: on 12 of 24 CPUs, 6 workers made the translation 40% slower than 12
 unsigned half_cpus();   // vk_progcache.cpp
-unsigned compile_threads(unsigned dflt);   // vk_progcache.cpp: RX_VK_COMPILE_THREADS, else dflt
+unsigned compile_threads(unsigned dflt);   // vk_progcache.cpp: RX_VK_COMPILE_THREADS, else dflt (Android: 1)
+extern thread_local bool compile_gated;   // vk_progcache.cpp: this thread's pipeline builds have no one waiting on them
+#ifdef __ANDROID__
+void compile_gate();       // vk_progcache.cpp: before the driver compiles a pipeline, a wait while the native heap is far up
+void compile_finished();   // vk_progcache.cpp: after it, the allocator's free memory given back now and then
+#endif
 /// (hookshot) The driver's shader cache folders' size, logged with when: at the start, after the prediction
 void driver_cache_log(const char* when);   // vk_draw.cpp
 /// (hookshot) At the start after a preparation, behind the game: a sample of its predicted pipelines asked of the driver without

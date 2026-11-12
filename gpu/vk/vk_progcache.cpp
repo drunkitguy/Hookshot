@@ -27,6 +27,9 @@
 #include <string>
 #include <thread>
 #include <type_traits>
+#ifdef __ANDROID__
+#include <malloc.h>   // (mallinfo, mallopt: compile_gate)
+#endif
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -642,11 +645,50 @@ unsigned half_cpus() {
 // (hookshot) RX_VK_COMPILE_THREADS=<n>: the threads that translate shaders and build pipelines, the preparation's at start and the
 // background workers in play (vk_jobs.cpp). A test: each compile holds the translator's and the driver's working memory, and on
 // the AYN Thor the native heap reached 5.7 GB while Turnip built the gameplay pipelines (round 10)
+// (android: one by default. The start's precompile built with 8 at once on Turnip and the native heap went to 4.8 GB in 22 s, then
+// the driver's own malloc failed (Scudo "internal map failure", AYN Thor, cycle 8))
 unsigned compile_threads(unsigned dflt) {
-    static const int n = getenv("RX_VK_COMPILE_THREADS") ? std::clamp(atoi(getenv("RX_VK_COMPILE_THREADS")), 1, 32) : 0;
+    static const int n = getenv("RX_VK_COMPILE_THREADS") ? std::clamp(atoi(getenv("RX_VK_COMPILE_THREADS")), 1, 32)
+#ifdef __ANDROID__
+                                                         : 1;
+#else
+                                                         : 0;
+#endif
     static std::atomic<bool> said{false};
-    if (n && !said.exchange(true)) logf("vk: %d threads translate shaders and build pipelines (RX_VK_COMPILE_THREADS)", n);
+    if (n && !said.exchange(true))
+        logf("vk: %d threads translate shaders and build pipelines (RX_VK_COMPILE_THREADS%s)", n,
+             getenv("RX_VK_COMPILE_THREADS") ? "" : ", Android's default");
     return n ? (unsigned)n : dflt;
 }
+thread_local bool compile_gated = false;   // (set by the start's precompile and preparation workers, vk_draw.cpp)
+#ifdef __ANDROID__
+// (android) Around each pipeline the driver compiles on a compile_gated thread (guarded_graphics, guarded_compute; never one the
+// replay waits on, which a 20 s wait would freeze, nor a probe of the cache): before, a wait while the native heap is
+// RX_VK_COMPILE_HEAP_MB (1536) above what it was at the first compile, up to 20 s, as the other compiles finish and free theirs;
+// after, every 4th, what the allocator holds free given back to the system (M_PURGE: the driver's compiler frees GBs it had).
+// A heap that stays up through a whole wait is held, not in flight: the line moves up to it, so only new growth waits again
+static std::atomic<size_t> heap_baseline{0};
+void compile_gate() {
+    static const size_t over = (size_t)(getenv("RX_VK_COMPILE_HEAP_MB") ? std::max(256, atoi(getenv("RX_VK_COMPILE_HEAP_MB"))) : 1536) << 20;
+    static std::once_flag base;
+    std::call_once(base, [] { heap_baseline = (size_t)mallinfo().uordblks; });
+    const size_t now = (size_t)mallinfo().uordblks, line = heap_baseline.load();
+    if (now <= line + over) return;
+    static std::atomic<int> told{0};
+    if (told++ < 8)
+        logf("vk: a pipeline waits for the native heap (%zu MB, %zu MB above its line) to come down", now >> 20, (now - line) >> 20);
+    mallopt(M_PURGE, 0);
+    int i = 0;
+    for (; i < 200 && (size_t)mallinfo().uordblks > heap_baseline.load() + over; i++) Sleep(100);
+    if (i == 200) {
+        heap_baseline = (size_t)mallinfo().uordblks;
+        logf("vk: the native heap stayed up (%zu MB): its line moves there", heap_baseline.load() >> 20);
+    }
+}
+void compile_finished() {
+    static std::atomic<uint32_t> n{0};
+    if (++n % 4 == 0) mallopt(M_PURGE, 0);
+}
+#endif
 
 } // namespace mkwvk
