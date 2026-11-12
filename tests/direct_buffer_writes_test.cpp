@@ -64,6 +64,13 @@ static BufferRef stream_copy_guest(uint64_t, uint64_t n) {
     ++copies;
     return {kStreamBuffer, 256u * copies, n, 0};
 }
+static uint64_t serial = 1;   // (the recording being made)
+static uint64_t recording_serial() { return serial; }
+struct CopyMemo { uint64_t gpu = 0, size = 0, serial = 0, wgen = 0; BufferRef ref{}; };
+static thread_local CopyMemo copy_memo[256];
+static bool replay_wrote = false;   // (a replay write over the range since the copy)
+static uint64_t replay_write_now() { return 0; }
+static bool replay_wrote_since(uint64_t, uint64_t, uint64_t) { return replay_wrote; }
 static const uint8_t* gpu_ptr(uint64_t, uint64_t* avail) {
     *avail = mapping_valid ? 4ull << 20 : 0;
     return mapping_valid ? reinterpret_cast<const uint8_t*>(&pool) : nullptr;
@@ -129,9 +136,15 @@ int main(int argc, char** argv) {
         if (hazards) require(hazard_lo == guest && hazard_hi == guest + size, "changed mirrored-write hazard range");
         if (mode == "copied_read") {
             require(ref.buffer == kStreamBuffer && ref.size == size && copies == 1, "a read no pool holds was not copied");
+            require(gpu_buffer_bind(gpu, size, false).offset == ref.offset && copies == 1,
+                    "a range copied in this recording was copied again");
+            replay_wrote = true;
             require(gpu_buffer_bind(gpu, size, false).buffer == kStreamBuffer && copies == 2,
-                    "a copied read was remembered (its stream is the recording's)");
-            require(!gpu_buffer_bind(gpu, size, true) && copies == 2, "a write no pool holds was copied");
+                    "a copy the replay wrote over since was reused");
+            replay_wrote = false, serial++;
+            require(gpu_buffer_bind(gpu, size, false).buffer == kStreamBuffer && copies == 3,
+                    "a copy of an earlier recording was reused");
+            require(!gpu_buffer_bind(gpu, size, true) && copies == 3, "a write no pool holds was copied");
             require(!pool.last_value && writebacks.empty(), "a copied read changed pool bookkeeping");
             page_state(guest, size, false);
         } else if (mode == "invalid_pool" || mode == "invalid_mapping") {

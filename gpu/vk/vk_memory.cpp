@@ -2051,6 +2051,9 @@ void span_game_pools(uint64_t& lo, uint64_t& hi, uint64_t chunk) {
 
 Pool* pool_lookup(uint64_t guest, uint64_t size) {
     if (guest_pools.empty()) return nullptr;
+#ifdef __ANDROID__
+    if (via_adreno && adreno_dead) return nullptr;   // (no import can take: not planned, tried and logged ~3000 times a second)
+#endif
     bg_drain();
     auto it = std::upper_bound(guest_pools.begin(), guest_pools.end(), guest,
                                [](uint64_t a, const GuestPool& p) { return a < p.lo; });
@@ -2794,6 +2797,29 @@ bool copy_reads_on() {
 }
 constexpr uint64_t kCopyReadMax = 8ull << 20;
 std::atomic<int64_t> st_copy_reads{0}, st_copy_read_kb{0};
+int64_t copied_read_kb() { return st_copy_read_kb.load(); }
+// (a range copied once a recording: every draw that bound the same vertex buffer copied it again, ~150 MB/s. The bytes are the
+// submission's (memory_read_as_submitted), so they hold for the recording unless the replay itself writes guest memory
+// (guest_cpu_write): its last 64 writes are kept, and a copy made before one that overlaps it is made again. Pages in no capture
+// are read live, and a reuse keeps them as the recording's first read of them saw them)
+struct CopyMemo { uint64_t gpu = 0, size = 0, serial = 0, wgen = 0; BufferRef ref{}; };
+thread_local CopyMemo copy_memo[256];
+std::mutex replay_writes_mu;
+std::pair<uint64_t, uint64_t> replay_writes[64];
+uint64_t replay_write_gen = 0;
+uint64_t replay_write_now() {
+    std::lock_guard lk(replay_writes_mu);
+    return replay_write_gen;
+}
+bool replay_wrote_since(uint64_t gen, uint64_t lo, uint64_t hi) {
+    std::lock_guard lk(replay_writes_mu);
+    if (replay_write_gen - gen > 64) return true;
+    for (uint64_t g = gen; g < replay_write_gen; g++) {
+        const auto& w = replay_writes[g & 63];
+        if (w.first < hi && lo < w.second) return true;
+    }
+    return false;
+}
 
 BufferRef gpu_buffer_bind(uint64_t gpu, uint64_t size, bool written) {
     if (written) texture_gpu_wrote(gpu, size);
@@ -2850,7 +2876,13 @@ BufferRef gpu_buffer_bind(uint64_t gpu, uint64_t size, bool written) {
     Pool* p = pool_of(guest, size);
     if (!p && !written && size && size <= kCopyReadMax && copy_reads_on()) {
         lk.unlock();   // (memory_read_as_submitted takes pools_mu)
+        CopyMemo& m = copy_memo[bind_slot(gpu, size)];
+        const uint64_t serial = recording_serial();
+        if (m.ref && m.gpu == gpu && m.size == size && m.serial == serial && !replay_wrote_since(m.wgen, gpu, gpu + size))
+            return m.ref;
+        const uint64_t wgen = replay_write_now();
         const BufferRef r = stream_copy_guest(gpu, size);
+        m = r ? CopyMemo{gpu, size, serial, wgen, r} : CopyMemo{};
         if (r && ++st_copy_reads % 20000 == 1)
             logf("vk: reads of guest memory copied into the streams: %lld (%lld MB)", (long long)st_copy_reads.load(),
                  (long long)(st_copy_read_kb.load() >> 10));
@@ -3531,6 +3563,10 @@ void shadow_written_collected(const uint32_t* pages, int64_t n) {
 }
 int guest_cpu_write(uint64_t gpu, const void* src, uint64_t n) {
     const int ok = host->gpu_write(gpu, src, n);
+    {   // (the copied reads made before it are stale: CopyMemo)
+        std::lock_guard lk(replay_writes_mu);
+        replay_writes[replay_write_gen++ & 63] = {gpu, gpu + n};
+    }
     guest_cpu_wrote(gpu, n);
     return ok;
 }

@@ -99,6 +99,7 @@ constexpr VkBufferUsageFlags kStreamUse = VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | V
 std::atomic<uint64_t> stream_extra{0}, stream_grown{0}, stream_peak{0};
 bool grow_off = false;
 bool stream_grow_off() { return grow_off; }
+uint64_t recording_serial_n = 0; uint64_t stream_keep_cap() { return ~0ull; } int64_t copied_read_kb() { return 0; } bool copy_reads_on() { return false; }   // (the copied reads' share of draw_begin_recording)
 struct BufferRef { VkBuffer buffer{}; uint64_t offset = 0, size = 0, address = 0; };
 /* POOL */
 /* STREAM */

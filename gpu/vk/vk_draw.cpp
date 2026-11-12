@@ -409,6 +409,13 @@ bool stream_grow_off() {
 }
 const uint64_t kStream = (getenv("RX_VK_STREAM_MB") ? (uint64_t)std::max(1, atoi(getenv("RX_VK_STREAM_MB"))) : stream_grow_off() ? 24u : 2u) << 20;
 std::atomic<uint64_t> stream_peak{0}, stream_extra{0}, stream_grown{0};
+uint64_t recording_serial_n = 0;   // (draw_begin_recording's count: what was copied into a stream is the recording's)
+// (RX_VK_STREAM_KEEP_MB: the grown streams all the slots may keep, 512 MB by default; past it a slot gives its back when it is begun
+// again and copied reads are refused)
+uint64_t stream_keep_cap() {
+    static const uint64_t mb = getenv("RX_VK_STREAM_KEEP_MB") ? (uint64_t)std::max(1, atoi(getenv("RX_VK_STREAM_KEEP_MB"))) : 512u;
+    return mb << 20;
+}
 std::deque<RecordingRes> res;   // (a deque: a recording thread keeps its own in place while another is added)
 thread_local RecordingRes* cur = nullptr;
 
@@ -4634,7 +4641,10 @@ void draw_begin_recording(int slot, VkCommandBuffer cmd, uint64_t value) {
         static const bool keep = env_on("RX_VK_STREAM_KEEP");
         if (r.streams.size() > 1 && !keep) {
             if (r.si > 0) r.idle = 0;
-            else if (++r.idle >= 120) {
+            else r.idle++;
+            // (and, where reads are copied (RX_VK_COPY_READS), at once while all the slots' grown streams pass stream_keep_cap: they
+            // grew every slot's to ~90 MB, 4.5 GB in all, and Android killed the game)
+            if (r.idle >= 120 || (copy_reads_on() && stream_extra.load() > stream_keep_cap())) {
                 for (size_t i = 1; i < r.streams.size(); i++) {
                     stream_extra -= r.streams[i].size;
                     destroy_buffer(r.streams[i].buffer, r.streams[i].alloc);
@@ -4651,11 +4661,17 @@ void draw_begin_recording(int slot, VkCommandBuffer cmd, uint64_t value) {
         r.si = 0, r.stream = VK_NULL_HANDLE, r.stream_alloc = nullptr, r.mapped = nullptr, r.size = 0;
     }
     if (r.before + r.used > stream_peak.load(std::memory_order_relaxed)) stream_peak.store(r.before + r.used, std::memory_order_relaxed);
-    static int64_t begun;
-    if (++begun % 3000 == 0)
-        logf("vk: the recording streams: %zu of %llu MB, the most one held %llu KB; %llu made on demand (%llu MB kept now)", res.size(),
+    static int64_t begun, copied_kb_was;
+    recording_serial_n++;
+    if (++begun % 3000 == 0) {
+        const int64_t copied_kb = copied_read_kb();
+        logf("vk: the recording streams: %zu of %llu MB, the most one held %llu KB; %llu made on demand (%llu MB kept now); "
+             "copied reads %lld MB in the last 3000 recordings", res.size(),
              (unsigned long long)(kStream >> 20), (unsigned long long)(stream_peak.load(std::memory_order_relaxed) >> 10),
-             (unsigned long long)stream_grown.load(), (unsigned long long)(stream_extra.load() >> 20));
+             (unsigned long long)stream_grown.load(), (unsigned long long)(stream_extra.load() >> 20),
+             (long long)((copied_kb - copied_kb_was) >> 10));
+        copied_kb_was = copied_kb;
+    }
     r.used = 0, r.before = 0;
     r.c1_at.clear();
     cur = &r;
@@ -9051,17 +9067,19 @@ BufferRef stream_copy(const void* src, uint64_t n) {
 }
 /// (hookshot) n bytes of guest memory at gpu, as the submission had them, copied into the recording's stream (vk_memory.cpp
 /// gpu_buffer_bind: a read no pool holds, RX_VK_COPY_READS); empty when there is no recording, no room or the range is unreadable
+uint64_t recording_serial() { return recording_serial_n; }
 BufferRef stream_copy_guest(uint64_t gpu, uint64_t n) {
     ParLock lk;
     if (!cur || !n) return {};
     // (RX_VK_COPY_READS_MB: copies only while the recording's streams hold less than this, 64 MB by default; past it the reads are
     // left out, as without the copies)
     static const uint64_t budget = (getenv("RX_VK_COPY_READS_MB") ? (uint64_t)std::max(1, atoi(getenv("RX_VK_COPY_READS_MB"))) : 64u) << 20;
-    if (cur->before + cur->used + n > budget) {
+    if (cur->before + cur->used + n > budget || stream_extra.load() > stream_keep_cap()) {
         static std::atomic<bool> said{false};
         if (!said.exchange(true))
-            logf("vk: copied reads: the recording's %llu MB budget is spent, draws left out (RX_VK_COPY_READS_MB)",
-                 (unsigned long long)(budget >> 20));
+            logf("vk: copied reads: the recording's %llu MB budget or the streams' %llu MB is spent, draws left out "
+                 "(RX_VK_COPY_READS_MB, RX_VK_STREAM_KEEP_MB)", (unsigned long long)(budget >> 20),
+                 (unsigned long long)(stream_keep_cap() >> 20));
         return {};
     }
     const uint64_t align = std::max<uint64_t>({256, dev.props.limits.minUniformBufferOffsetAlignment,

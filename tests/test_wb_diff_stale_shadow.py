@@ -87,6 +87,9 @@ bool diff_on = true;
 bool wb_diff_on() { return diff_on; }
 std::mutex shadow_written_mu;
 std::vector<uint32_t> shadow_written_pages, shadow_written_collected_list, shadow_written_by_replay;
+std::mutex replay_writes_mu;   // (guest_cpu_write's note for the copied reads: CopyMemo)
+std::pair<uint64_t, uint64_t> replay_writes[64];
+uint64_t replay_write_gen = 0;
 bool shadow_written_all = false;
 int64_t st_wbd_known_game = 0, st_wbd_known_collected = 0, st_wbd_known_replay = 0;
 void shadow_written_to(std::vector<uint32_t>& list, const uint32_t* pages, int64_t n);
