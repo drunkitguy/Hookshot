@@ -546,7 +546,7 @@ Id EmitIsbeRead(EmitContext& ctx, Id address) {
                                                                   ctx.rescaling_push_constants, ctx.Const(ctx.mesh_first_member_index)))};
             const Id draw{ctx.OpLoad(ctx.U32[1], ctx.draw_index)};
             const Id at{ctx.OpIAdd(ctx.U64, table, ctx.OpUConvert(ctx.U64, ctx.OpIMul(ctx.U32[1], draw, ctx.Const(16U))))};
-            const Id member{ctx.OpAccessChain(ctx.mesh_first_member_pointer, ctx.OpConvertUToPtr(ctx.mesh_first_block_pointer, at),
+            const Id member{ctx.OpAccessChain(ctx.mesh_first_member_pointer, ctx.AddressToPointer(ctx.mesh_first_block_pointer, at),
                                               ctx.Const(0U))};
             const Id first{ctx.OpLoad(ctx.U32[1], member, spv::MemoryAccessMask::Aligned, 4U)};
             return ctx.OpIAdd(ctx.U32[1], workgroup, first);

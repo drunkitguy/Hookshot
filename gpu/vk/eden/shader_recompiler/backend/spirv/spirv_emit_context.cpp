@@ -1109,7 +1109,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
             it = psb_types.emplace(type.value, std::make_pair(TypePointer(spv::StorageClass::PhysicalStorageBuffer, block),
                                                         TypePointer(spv::StorageClass::PhysicalStorageBuffer, type))).first;
         }
-        const Id member{OpAccessChain(it->second.second, OpConvertUToPtr(it->second.first, address), Const(0U))};
+        const Id member{OpAccessChain(it->second.second, AddressToPointer(it->second.first, address), Const(0U))};
         return OpLoad(type, member, spv::MemoryAccessMask::Aligned, align);
     };
     const auto psb_member = [&](Id type, Id address) {   // (a pointer to a value at an address, for stores and atomics)
@@ -1121,7 +1121,7 @@ void EmitContext::DefineGlobalMemoryFunctions(const Info& info) {
             it = psb_types.emplace(type.value, std::make_pair(TypePointer(spv::StorageClass::PhysicalStorageBuffer, block),
                                                         TypePointer(spv::StorageClass::PhysicalStorageBuffer, type))).first;
         }
-        return OpAccessChain(it->second.second, OpConvertUToPtr(it->second.first, address), Const(0U));
+        return OpAccessChain(it->second.second, AddressToPointer(it->second.first, address), Const(0U));
     };
     // (the page table's lookup of addr: hit(target) is called in the block where the page is mapped, its device address in target,
     // and must end that block (a return). Falls through after it)
@@ -1656,7 +1656,15 @@ Id EmitContext::MeshFallbackWord(Id address) {
         mesh_fallback_word_ptr = TypePointer(spv::StorageClass::PhysicalStorageBuffer, block);
     }
     const Id pointer_type{TypePointer(spv::StorageClass::PhysicalStorageBuffer, U32[1])};
-    return OpAccessChain(pointer_type, OpConvertUToPtr(mesh_fallback_word_ptr, address), Const(0U));
+    return OpAccessChain(pointer_type, AddressToPointer(mesh_fallback_word_ptr, address), Const(0U));
+}
+
+// (hookshot) Qualcomm's own driver: "INTERNAL ERROR: Instruction OpConvertUToPtr not supported", and the pipelines of every
+// program that follows a pointer were not made (AYN Thor, Adreno 740: most of a heavy scene's draws left out). There the
+// address's two words are bitcast to the pointer, GL_EXT_buffer_reference_uvec2's form; everywhere else as before
+Id EmitContext::AddressToPointer(Id pointer_type, Id address) {
+    if (profile.has_broken_convert_u_to_ptr) return OpBitcast(pointer_type, OpBitcast(U32[2], address));
+    return OpConvertUToPtr(pointer_type, address);
 }
 
 void EmitContext::DefineRescalingInputUniformConstant() {

@@ -648,13 +648,13 @@ bool memory_init() {
             via_adreno = true;
             dev.external_memory_host = true;   // (what the rest of this file asks before it imports)
             logf("vk: no VK_EXT_external_memory_host: guest memory through libadrenotools' import (the device's own driver)");
-        } else if (at && !atoi(at)) {   // (the replay as with the import given up: guest memory not imported)
+        } else {   // (the replay as with the import given up: guest memory not imported, the GPU's reads of it copied (RX_VK_COPY_READS))
+            // (HOS_ADRENOTOOLS=0, or a custom driver (Turnip) without the extension: libadrenotools' import is the device's own driver's
+            // only; that driver failed at start with "renderer startup failed")
             via_adreno = adreno_dead = true;
             dev.external_memory_host = true;
-            logf("vk: HOS_ADRENOTOOLS=0: no VK_EXT_external_memory_host and no libadrenotools: guest memory not imported");
-        } else {
-            logf("vk: no VK_EXT_external_memory_host, and no libadrenotools import (it works with the device's own driver only: "
-                 "choose \"Use the system driver\")");
+            logf("vk: no VK_EXT_external_memory_host and no libadrenotools import (%s): guest memory not imported",
+                 at && !atoi(at) ? "HOS_ADRENOTOOLS=0" : "a custom driver, or the import not loaded");
         }
     }
 #endif

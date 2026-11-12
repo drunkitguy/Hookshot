@@ -429,6 +429,7 @@ public:
     u32 mesh_fallback_indirect_input_member_index{};
     /// A pointer to the u32 at a PhysicalStorageBuffer device address
     Id MeshFallbackWord(Id address);
+    Id AddressToPointer(Id pointer_type, Id address);   // (hookshot: a 64-bit address as a PhysicalStorageBuffer pointer)
 
     Id load_const_func_u8{};
     Id load_const_func_u16{};

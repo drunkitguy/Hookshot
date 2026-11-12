@@ -246,6 +246,18 @@ bool create_device() {
              has("VK_EXT_external_memory_dma_buf"), has("VK_KHR_external_memory_fd"),
              has("VK_ANDROID_external_memory_android_hardware_buffer"), has("VK_EXT_queue_family_foreign"),
              heap >= 0 ? "opens" : "does not open", heap >= 0 ? 0 : heap_errno);
+        // (and what the game's colour targets can be here, optimal tiling: sampled 0x1, storage 0x2, colour attachment 0x80, blend
+        // 0x100, linear filter 0x1000. A target format without storage is written through a 32-bit integer view: storage_view_format)
+        const VkFormat fmts[] = {VK_FORMAT_B10G11R11_UFLOAT_PACK32, VK_FORMAT_R16G16B16A16_SFLOAT, VK_FORMAT_A2B10G10R10_UNORM_PACK32,
+                                 VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R16G16_SFLOAT, VK_FORMAT_R32G32B32A32_SFLOAT};
+        uint32_t feat[6];
+        for (int i = 0; i < 6; i++) {
+            VkFormatProperties fp{};
+            vkGetPhysicalDeviceFormatProperties(dev.physical, fmts[i], &fp);
+            feat[i] = fp.optimalTilingFeatures;
+        }
+        logf("vk: target formats' features: R11G11B10F %#x, RGBA16F %#x, RGB10A2 %#x, RGBA8 %#x, RG16F %#x, RGBA32F %#x",
+             feat[0], feat[1], feat[2], feat[3], feat[4], feat[5]);
     }
 #endif
     auto optional = [&](const char* name, bool& flag) {
@@ -466,6 +478,20 @@ bool create_device() {
         dev.driver_id = drv.driverID;
         logf("vk: subgroups: default %u lanes, %u-%u, pinned to 32 on stages %#x", sg.subgroupSize, sc.minSubgroupSize, sc.maxSubgroupSize,
              (unsigned)dev.sg32_stages);
+#ifdef __ANDROID__
+        {   // (android: which driver this run has, the start screen's or HOS_DRIVER's (host/posix/win32_posix.c logs its file), and
+            // what of it the translation and guest memory depend on)
+            const uint32_t v = p2.properties.driverVersion, a = p2.properties.apiVersion;
+            const bool qcom = drv.driverID == VK_DRIVER_ID_QUALCOMM_PROPRIETARY;   // (Qualcomm's: 10.22 bits; Mesa's: Vulkan's form)
+            logf("vk: driver id %d, %s (%s), conformance %u.%u.%u.%u, driver version %u.%u.%u (%#x), Vulkan %u.%u.%u; shaderInt64 %d, "
+                 "shaderFloat16 %d, storageBuffer16BitAccess %d, bufferDeviceAddress %d, VK_EXT_external_memory_host %d",
+                 (int)drv.driverID, drv.driverName, drv.driverInfo, drv.conformanceVersion.major, drv.conformanceVersion.minor,
+                 drv.conformanceVersion.subminor, drv.conformanceVersion.patch, qcom ? v >> 22 : VK_API_VERSION_MAJOR(v),
+                 qcom ? (v >> 12) & 0x3ff : VK_API_VERSION_MINOR(v), qcom ? v & 0xfff : VK_API_VERSION_PATCH(v), v,
+                 VK_API_VERSION_MAJOR(a), VK_API_VERSION_MINOR(a), VK_API_VERSION_PATCH(a), (int)f.features.shaderInt64,
+                 (int)f12.shaderFloat16, (int)f11.storageBuffer16BitAccess, (int)f12.bufferDeviceAddress, (int)dev.external_memory_host);
+        }
+#endif
     }
     if (!f13.dynamicRendering || !f13.synchronization2 || !f12.timelineSemaphore) {
         logf("vk: the GPU lacks dynamic rendering, synchronization2 or timeline semaphores");

@@ -90,7 +90,13 @@ __attribute__((visibility("default"))) int SDL_main(int argc, char **argv) {
     const char *game = getenv("HOOKSHOT_DIR");
     LOGI("game folder: %s", game);
     chdir(game);
-    custom_driver(game, sdl_path("SDL_AndroidGetInternalStoragePath", "SDL_GetAndroidInternalStoragePath"));
+    const char *internal = sdl_path("SDL_AndroidGetInternalStoragePath", "SDL_GetAndroidInternalStoragePath");
+    custom_driver(game, internal);
+    if (internal && !getenv("HOOKSHOT_VK_DRIVER_DIR")) {   /* (the start screen's driver folder, for HOS_DRIVER: win32_posix.c) */
+        char dir[1024];
+        snprintf(dir, sizeof dir, "%s/driver/", internal);
+        setenv("HOOKSHOT_VK_DRIVER_DIR", dir, 1);
+    }
     /* (an app's stderr is /dev/null, and a valid one: the game opens hookshot_log.txt only when it has none. Opened here,
        so what the game says, and why it ends, is in the file the start screen shows) */
     if (freopen("hookshot_log.txt", "w", stderr)) setvbuf(stderr, NULL, _IONBF, 0);

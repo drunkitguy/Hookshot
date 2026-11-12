@@ -105,6 +105,7 @@ struct Profile {
     bool has_broken_spirv_subgroup_mask_vector_extract_dynamic{};
     bool has_broken_spirv_subgroup_shuffle{};
     bool has_broken_spirv_fragment_shuffle{};   // (Lichii #273: AMD's proprietary driver, fragment stages only)
+    bool has_broken_convert_u_to_ptr{};   // (hookshot: Qualcomm's own driver has no OpConvertUToPtr; EmitContext::AddressToPointer)
     u32 max_subgroup_size{};
 
     u32 gl_max_compute_smem_size{};

@@ -81,13 +81,21 @@ static void pointer_update(uint32_t pressed, int wheel) {
 static uint32_t sdl_button_bit(int b) { return b == 1 ? HOS_MOUSE_LEFT : b == 3 ? HOS_MOUSE_RIGHT : b == 2 ? HOS_MOUSE_MIDDLE : 0; }
 
 /* ---- keys: SDL's scancodes (USB HID usages) as Windows' virtual keys ---- */
+#ifdef __ANDROID__
+/* (android: a key's press and release in one pass of the event loop never reached the state read after it: adb's
+   `input keyevent` sends both at once, and the game saw nothing. A press counts for 100 ms at least) */
+static ULONGLONG key_tapped_until[256];
+#define KEY_TAPPED(sc) ((sc) < 256 && key_tapped_until[sc] > GetTickCount64())
+#else
+#define KEY_TAPPED(sc) 0
+#endif
 static void keys_update(void) {
     int n = 0;
     const uint8_t *k = hos_sdl_keys(&n);
     uint8_t v[256];
     memset(v, 0, sizeof v);
     if (k && hos_posix_window[0]) {
-#define K(sc) ((sc) < n && k[sc])
+#define K(sc) (((sc) < n && k[sc]) || KEY_TAPPED(sc))
         for (int i = 0; i < 26; i++) v['A' + i] = K(4 + i);
         for (int i = 0; i < 9; i++) v['1' + i] = K(30 + i);
         v['0'] = K(39);
@@ -343,6 +351,9 @@ void hos_display_loop(void) {
                     break;
                 case HOS_SDL_EV_KEY_DOWN: {
                     const int scancode = e.scancode, mod = e.mod;
+#ifdef __ANDROID__
+                    if (scancode >= 0 && scancode < 256) key_tapped_until[scancode] = GetTickCount64() + 100;
+#endif
                     if (e.scancode == 41) {   /* Esc (it may open the Insert menu too: the capture comes back) */
                         if (!menu_open && mouse_captured) esc_had_capture = 1;
                         mouse_capture(0);

@@ -814,6 +814,33 @@ HMODULE LoadLibraryA(LPCSTR name) {
         /* (through libadrenotools, android/app/src/main/cpp/hookshot_adreno.cpp: a custom GPU driver the start screen
            chose, or the device's own with the memory import the renderer needs there) */
         const char *drv = getenv("HOOKSHOT_VK_DRIVER"), *dir = getenv("HOOKSHOT_VK_DRIVER_DIR"), *libs = getenv("HOOKSHOT_NATIVE_LIB_DIR");
+        /* (HOS_DRIVER in hookshot_env.txt, for this run only: a .so in the app's driver folder by name, or "system"; the start
+           screen's choice stays as it is. HOS_DEFAULT_DRIVER: the same when neither names one, the system's for now) */
+#define HOS_DEFAULT_DRIVER NULL
+        const char *pick = getenv("HOS_DRIVER");
+        if (!pick && !(drv && drv[0])) pick = HOS_DEFAULT_DRIVER;
+        if (pick && pick[0]) {
+            char at_path[PATH_MAX];
+            snprintf(at_path, sizeof at_path, "%s%s", dir ? dir : "", pick);
+            const size_t pn = strlen(pick);
+            struct stat st;
+            if (!strcmp(pick, "system")) drv = NULL;
+            else if (dir && pn > 3 && !strcmp(pick + pn - 3, ".so") && stat(at_path, &st) == 0 && S_ISREG(st.st_mode)) drv = pick;
+            fprintf(stderr, "vk: HOS_DRIVER=%s: %s\n", pick, !strcmp(pick, "system") ? "the system's driver" :
+                    drv == pick ? "that driver" : "no such .so in the driver folder, the start screen's choice instead");
+        }
+        if (drv && drv[0] && dir) {   /* (which file this run's driver is: its size and an FNV-1a hash of its bytes) */
+            char at_path[PATH_MAX];
+            snprintf(at_path, sizeof at_path, "%s%s", dir, drv);
+            FILE *f = fopen(at_path, "rb");
+            unsigned long long h = 0xcbf29ce484222325ull, n = 0;
+            static unsigned char buf[1 << 16];
+            size_t k;
+            while (f && (k = fread(buf, 1, sizeof buf, f)) > 0)
+                for (size_t i = 0; i < k; i++) h = (h ^ buf[i]) * 0x100000001b3ull, n++;
+            if (f) fclose(f);
+            fprintf(stderr, "vk: driver file %s, %llu bytes, fnv1a %016llx\n", at_path, n, h);
+        }
         /* (HOS_ADRENOTOOLS=0 in hookshot_env.txt: the system's libvulkan.so as it is, no libadrenotools, no hook) */
         const char *at = getenv("HOS_ADRENOTOOLS");
         if (at && !atoi(at)) fprintf(stderr, "vk: HOS_ADRENOTOOLS=0: no libadrenotools, the system's libvulkan.so%s\n", drv && drv[0] ? " (the custom driver left out)" : "");

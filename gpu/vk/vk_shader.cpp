@@ -569,6 +569,10 @@ Shader::Profile make_profile() {
     // (RX_VK_FRAG_SHUFFLE_FALLBACK=0 or 1, a test: the fragment stages' shuffles native or through broadcasts, whatever the
     // driver; in the cache's stamp)
     if (const char* e = getenv("RX_VK_FRAG_SHUFFLE_FALLBACK")) p.has_broken_spirv_fragment_shuffle = e[0] == '1';
+    // (Qualcomm's own driver compiles no OpConvertUToPtr: addresses bitcast to pointers there. RX_VK_PTR_BITCAST=0 / 1, a test:
+    // off / on whatever the driver; in the cache's stamp)
+    p.has_broken_convert_u_to_ptr = dev.driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY;
+    if (const char* e = getenv("RX_VK_PTR_BITCAST")) p.has_broken_convert_u_to_ptr = e[0] == '1';
     p.min_ssbo_alignment = dev.props.limits.minStorageBufferOffsetAlignment;
     return p;
 }
@@ -1127,6 +1131,11 @@ uint64_t translator_stamp() {
                               profile().has_broken_spirv_fragment_shuffle ? 1u : 0u, (uint32_t)dev.sg32_stages,
                               getenv("RX_VK_WARP64") ? 1u : 0u};
     add(lanes, sizeof lanes);
+    // (addresses bitcast to pointers, Qualcomm's own driver or RX_VK_PTR_BITCAST=1: only then, so other GPUs keep their caches)
+    if (profile().has_broken_convert_u_to_ptr) {
+        const uint32_t bitcast = 0x62637074u;   // ("ptcb")
+        add(&bitcast, sizeof bitcast);
+    }
     // (k10) f16 lowered to f32 on a GPU without f16 shaders (host_info): only then, so other GPUs keep their caches
     if (!dev.vk12.shaderFloat16) {
         const uint32_t no_f16 = 0x6e663136u;   // ("nf16")
