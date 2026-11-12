@@ -75,6 +75,7 @@ public class LauncherActivity extends Activity {
         launchButton = button(box, "Launch", v -> launch());
         button(box, "Copy the log", v -> ((ClipboardManager) getSystemService(CLIPBOARD_SERVICE))
                 .setPrimaryClip(ClipData.newPlainText("hookshot log", logText.getText())));
+        button(box, "Save the full log to Downloads", v -> saveLog());
         logText = text(box, "", 11);
         logText.setTextIsSelectable(true);
         ScrollView scroll = new ScrollView(this);
@@ -292,9 +293,60 @@ public class LauncherActivity extends Activity {
         }
     }
 
+    /** The log's lines about the renderer, the window and memory (its start: what a black screen is explained by), the first of them */
+    private String rendererLines(File f) {
+        StringBuilder s = new StringBuilder();
+        int n = 0;
+        try (BufferedReader r = new BufferedReader(new java.io.FileReader(f))) {
+            for (String line; (line = r.readLine()) != null && n < 120;) {
+                if (line.contains("vk:") || line.contains("display:") || line.contains("mem:") || line.contains("hookshot v")
+                        || line.contains("cannot") || line.contains("WARNING")) {
+                    s.append(line.length() > 320 ? line.substring(0, 320) : line).append('\n');
+                    n++;
+                }
+            }
+        } catch (Exception e) {
+            return "(none)\n";
+        }
+        return n == 0 ? "(none)\n" : s.toString();
+    }
+
+    /** hookshot_log.txt whole (its first 2 MB and last 300 KB when it is longer) as a file in Downloads, to send on */
+    private void saveLog() {
+        new Thread(() -> {
+            String said;
+            File f = new File(game, "hookshot_log.txt");
+            try {
+                android.content.ContentValues v = new android.content.ContentValues();
+                v.put(android.provider.MediaStore.MediaColumns.DISPLAY_NAME, "hookshot_log_" + (System.currentTimeMillis() / 1000) + ".txt");
+                v.put(android.provider.MediaStore.MediaColumns.MIME_TYPE, "text/plain");
+                Uri to = getContentResolver().insert(android.provider.MediaStore.Downloads.EXTERNAL_CONTENT_URI, v);
+                final long head = 2L << 20, last = 300L << 10;
+                try (OutputStream out = getContentResolver().openOutputStream(to); RandomAccessFile r = new RandomAccessFile(f, "r")) {
+                    byte[] buf = new byte[1 << 16];
+                    long len = r.length(), left = Math.min(len, head);
+                    for (int k; left > 0 && (k = r.read(buf, 0, (int) Math.min(buf.length, left))) > 0; left -= k) out.write(buf, 0, k);
+                    if (len > head + last) {
+                        out.write("\n[... the middle of the log is left out ...]\n".getBytes());
+                        r.seek(len - last);
+                    }
+                    for (int k; r.getFilePointer() < len && (k = r.read(buf)) > 0;) out.write(buf, 0, k);
+                    out.write(("\n" + logText.getText()).getBytes("UTF-8"));
+                }
+                said = "Saved to Downloads (hookshot_log_....txt).";
+            } catch (Exception e) {
+                said = "The log could not be saved: " + e;
+            }
+            final String shown = said;
+            ui.post(() -> driverText.setText(shown));
+        }).start();
+    }
+
     /** What the last run left: the game's own log, and what Android logged for this app (its crashes too) */
     private String lastLog() {
-        StringBuilder s = new StringBuilder("--- hookshot_log.txt (last run) ---\n").append(tail(new File(game, "hookshot_log.txt"), 6000));
+        File log = new File(game, "hookshot_log.txt");
+        StringBuilder s = new StringBuilder("--- renderer, window, memory (from the start of the last run) ---\n").append(rendererLines(log));
+        s.append("--- hookshot_log.txt (the end of the last run) ---\n").append(tail(log, 4000));
         s.append("\n--- Android's log for this app ---\n");
         try {
             Process p = Runtime.getRuntime().exec(new String[] {"logcat", "-d", "-t", "250", "-v", "brief", "hookshot:V", "SDL:V", "AndroidRuntime:E", "linker:W", "libc:F", "DEBUG:F", "*:S"});
