@@ -140,6 +140,9 @@ static void mouse_capture(int on) {
     hos_sdl_relative_mouse(window, on);
 }
 static void set_fullscreen(int on) {
+#ifdef __ANDROID__
+    on = 1;   /* (windowed, the navigation bar takes rows from the 1920x1080 swapchain; the menu's row reads it back as on) */
+#endif
     if (on == fullscreen) return;
     fullscreen = on;
     hos_posix_window[3] = on;
@@ -227,6 +230,9 @@ int hos_display_init(void) {
         hos_sdl_hint(hos_sdl_load() == 3 ? "SDL_VIDEO_DRIVER" : "SDL_VIDEODRIVER", "wayland,x11");
 #else
     (void)gamescope;
+    /* (landscape only: with no hint SDL's activity asks for FULL_USER for a resizable window, over the manifest's
+       sensorLandscape, and the Thor's panel came up portrait) */
+    hos_sdl_hint(hos_sdl_load() == 3 ? "SDL_ORIENTATIONS" : "SDL_IOS_ORIENTATIONS", "LandscapeLeft LandscapeRight");
 #endif
     /* (SDL2 on Wayland: libdecor from the start. SDL2 2.32 asks for the compositor's decorations before the window's first
        configure, and a compositor that answers "the client draws them" (COSMIC) has it unmap and map the window again
@@ -286,7 +292,11 @@ void hos_display_loop(void) {
         snprintf(png + n, sizeof png - n, "hookshot.png");
         hos_sdl_icon(window, png);
     }
+#ifdef __ANDROID__
+    set_fullscreen(1);   /* (SDL's immersive style: windowed, the navigation bar took 110 rows and the swapchain was 1920x970) */
+#else
     if (getenv("HOS_FULLSCREEN") && atoi(getenv("HOS_FULLSCREEN"))) set_fullscreen(1);
+#endif
     __atomic_store_n(&refresh_now, hos_sdl_refresh_mhz(window), __ATOMIC_RELAXED);
     pointer_update(0, 0);
     CloseHandle(CreateThread(NULL, 0, renderer_main, NULL, 0, NULL));

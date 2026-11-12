@@ -352,6 +352,11 @@ static bool import_pool_adreno(uint8_t* ptr, uint64_t bytes, uint64_t lo, uint64
     std::lock_guard<std::mutex> lk(mu);
     static uint32_t type = UINT32_MAX;   // (the memory type whose allocations take the import: found with the first pool)
     static int said;
+    static bool dead;   // (no allocation ever took the pages: not armed again, each arming leaks a KGSL object)
+    if (dead) {
+        import_remember_failure(lo, hi);
+        return false;
+    }
     VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bi.size = bytes;
     bi.usage = kUsage;
@@ -362,7 +367,7 @@ static bool import_pool_adreno(uint8_t* ptr, uint64_t bytes, uint64_t lo, uint64
     VkMemoryRequirements req{};
     vkGetBufferMemoryRequirements(dev.device, p.buffer, &req);
     const char* why = "no memory type's allocation took the pages";
-    bool ok = false;
+    bool ok = false, allocated_any = false;
     if (req.size != bytes || ((uintptr_t)ptr & 4095) || (bytes & 4095)) why = "the pool is not whole pages, or the buffer asks for more than it";
     else
         for (uint32_t i = 0; i < dev.memory.memoryTypeCount && !ok; i++) {
@@ -378,18 +383,24 @@ static bool import_pool_adreno(uint8_t* ptr, uint64_t bytes, uint64_t lo, uint64
             ai.pNext = &fl;
             ai.allocationSize = bytes;
             ai.memoryTypeIndex = i;
-            if (vkAllocateMemory(dev.device, &ai, nullptr, &p.memory) != VK_SUCCESS) continue;
-            if (adreno_taken()) {
+            const bool allocated = vkAllocateMemory(dev.device, &ai, nullptr, &p.memory) == VK_SUCCESS;
+            allocated_any |= allocated;
+            // (asked after every allocation, failed ones too: adreno_taken disarms an import no allocation took)
+            if (adreno_taken() && allocated) {
                 if (type == UINT32_MAX) logf("vk: guest pools are the driver's allocations of memory type %u (flags %#x)", i, dev.memory.memoryTypes[i].propertyFlags);
                 type = i, ok = true;
             } else {
-                vkFreeMemory(dev.device, p.memory, nullptr);
+                if (allocated) vkFreeMemory(dev.device, p.memory, nullptr);
                 p.memory = VK_NULL_HANDLE;
             }
         }
     if (ok && vkBindBufferMemory(dev.device, p.buffer, p.memory, 0) != VK_SUCCESS) {
         vkFreeMemory(dev.device, p.memory, nullptr);
         ok = false, why = "the buffer could not be bound";
+    }
+    if (!ok && allocated_any && type == UINT32_MAX && !strcmp(why, "no memory type's allocation took the pages")) {
+        dead = true;
+        logf("vk: no memory type's allocation took a pool's pages: libadrenotools' import given up, guest memory not imported");
     }
     if (!ok) {
         if (said++ < 8) logf("vk: pool %#llx..%#llx (%llu KB) not imported through libadrenotools: %s", (unsigned long long)lo, (unsigned long long)hi, (unsigned long long)(bytes >> 10), why);

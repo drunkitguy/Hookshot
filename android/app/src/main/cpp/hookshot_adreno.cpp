@@ -25,7 +25,13 @@ extern "C" __attribute__((visibility("default"))) int hookshot_import_user_mem(v
     return mapping && adrenotools_import_user_mem(mapping, ptr, size);
 }
 
-// 1 when the allocation made since hookshot_import_user_mem took those pages
+// 1 when the allocation made since hookshot_import_user_mem took those pages. 0: the import is disarmed, else the hook hands
+// the pages to the driver's next allocation of that size from any thread (its own command memory: the game wrote over it)
 extern "C" __attribute__((visibility("default"))) int hookshot_import_taken(void) {
-    return mapping && adrenotools_validate_gpu_mapping(mapping);
+    if (!mapping) return 0;
+    if (adrenotools_validate_gpu_mapping(mapping)) return 1;
+    // (the hook matches on size and on the allocation's flags holding all of the mapping's: no 32-bit gsl flags hold ~0)
+    static_cast<adrenotools_gpu_mapping *>(mapping)->size = 0;
+    static_cast<adrenotools_gpu_mapping *>(mapping)->flags = ~0ull;
+    return 0;
 }
