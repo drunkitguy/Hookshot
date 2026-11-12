@@ -48,6 +48,7 @@ struct Device {
     VkQueue queue = VK_NULL_HANDLE;
     // extensions in use
     bool mesh_shader = false, mesh_queries = false, external_memory_host = false, external_memory_fd = false, dma_buf_import = false, pipeline_library = false,
+         ahb_import = false,   // (android, HOS_GUEST_MEM=ahb: VK_ANDROID_external_memory_android_hardware_buffer, vk_memory.cpp)
          graphics_pipeline_library = false, custom_border_color = false, dynamic_state3 = false,
          depth_clip_control = false, null_descriptor = false, index_uint8 = false, push_descriptor = false,
          conditional_rendering = false, provoking_vertex = false, vertex_divisor = false, stencil_export = false, memory_budget = false,

@@ -318,6 +318,13 @@ bool create_device() {
     optional(VK_EXT_DEVICE_FAULT_EXTENSION_NAME, dev.device_fault);
     optional(VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME, dev.coop_matrix);
     optional(VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME, dev.swap_mutable);   // (hookshot: the overlays, vk_imgui.cpp)
+#ifdef __ANDROID__
+    if (const char* g = getenv("HOS_GUEST_MEM"); g && !strcmp(g, "ahb")) {   // (guest pools as AHardwareBuffers: vk_memory.cpp)
+        bool foreign = false;
+        optional("VK_EXT_queue_family_foreign", foreign);
+        if (foreign) optional("VK_ANDROID_external_memory_android_hardware_buffer", dev.ahb_import);
+    }
+#endif
     dlss_device_extensions(want, exts);   // (hookshot: NVIDIA DLSS's, vk_dlss.cpp)
     dlss_fg_device_extensions(want, exts);   // (hookshot: NVIDIA DLSS Frame Generation's through NGX, asked of NGX)
     bool fsr_descriptor_buffer = false;   // (hookshot, linux: only with a Vulkan FSR 4 library beside the game, vk_fsr4.cpp)

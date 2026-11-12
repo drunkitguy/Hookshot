@@ -22,6 +22,11 @@
 #include <thread>
 #ifdef __ANDROID__
 #include <malloc.h>   // (mallinfo: memory_watch)
+#include <android/hardware_buffer.h>   // (HOS_GUEST_MEM=ahb: guest pools as AHardwareBuffers)
+#include <linux/dma-buf.h>
+#include <sys/ioctl.h>
+#include <sys/mman.h>
+#include <vulkan/vulkan_android.h>
 #endif
 
 #define NOMINMAX
@@ -688,6 +693,337 @@ static void memory_watch_start() {
     }).detach();
 }
 #endif
+#ifdef __ANDROID__
+// ---- (android) HOS_GUEST_MEM=ahb: the game's GPU pools in AHardwareBuffers, shared by the CPU and the GPU ----
+// No driver here imports host memory (no VK_EXT_external_memory_host; libadrenotools' import never took), so the GPU's reads of
+// guest memory are copied into the recordings' streams, and a heavy scene's were refused by the thousand a second: geometry left
+// out. Here a pool the game makes (memory_pool_created) gets an AHardwareBuffer BLOB of its size: its dma-buf is mapped over the
+// pool's guest pages (MAP_SHARED | MAP_FIXED, the pages' contents copied in first) and the same buffer is imported into Vulkan
+// (VK_ANDROID_external_memory_android_hardware_buffer), so the pool is imported in place as on a PC (pool_lookup). Off by default;
+// a self-test at start (ahb_self_test) must pass first. RX_VK_AHB_MB: the most the pools take (2048); past it, copies as before.
+// shortcut: a pool's buffer stays when the game lets the pool go (the pages stay shared); free it at the pool's end if the cap fills
+struct NativeHandle { int version, numFds, numInts; int data[1]; };   // (cutils' native_handle_t: not in the NDK's headers)
+struct AhbApi {
+    int (*allocate)(const AHardwareBuffer_Desc*, AHardwareBuffer**) = nullptr;
+    void (*release)(AHardwareBuffer*) = nullptr;
+    const NativeHandle* (*handle)(const AHardwareBuffer*) = nullptr;
+};
+static AhbApi ahb_api;
+struct AhbRegion { uint64_t lo, hi; AHardwareBuffer* ahb; VkDeviceMemory memory; };
+static std::mutex ahb_mu;
+static std::vector<AhbRegion> ahb_regions;   // (ahb_mu; disjoint)
+static std::atomic<bool> ahb_ok{false};
+static uint64_t ahb_bytes = 0;               // (ahb_mu)
+static bool ahb_wanted() {
+    static const bool on = [] { const char* g = getenv("HOS_GUEST_MEM"); return g && !strcmp(g, "ahb"); }();
+    return on;
+}
+static bool ahb_load() {
+    void* lib = dlopen("libnativewindow.so", RTLD_NOW);
+    if (!lib) return false;
+    *(void**)&ahb_api.allocate = dlsym(lib, "AHardwareBuffer_allocate");
+    *(void**)&ahb_api.release = dlsym(lib, "AHardwareBuffer_release");
+    *(void**)&ahb_api.handle = dlsym(lib, "AHardwareBuffer_getNativeHandle");   // (not in the NDK's API: libnativewindow has it)
+    return ahb_api.allocate && ahb_api.release && ahb_api.handle;
+}
+static AHardwareBuffer* ahb_alloc(uint64_t bytes) {
+    AHardwareBuffer_Desc d{};
+    d.width = (uint32_t)bytes, d.height = 1, d.layers = 1, d.format = AHARDWAREBUFFER_FORMAT_BLOB;
+    d.usage = AHARDWAREBUFFER_USAGE_CPU_READ_OFTEN | AHARDWAREBUFFER_USAGE_CPU_WRITE_OFTEN | AHARDWAREBUFFER_USAGE_GPU_DATA_BUFFER;
+    AHardwareBuffer* b = nullptr;
+    return bytes <= 0xFFFFFFFFull && ahb_api.allocate(&d, &b) == 0 ? b : nullptr;
+}
+static int ahb_fd(AHardwareBuffer* b) {
+    const NativeHandle* h = ahb_api.handle(b);
+    return h && h->numFds > 0 ? h->data[0] : -1;
+}
+/// The buffer imported as Vulkan memory (not dedicated: a BLOB needs none, and each pool's VkBuffer is bound to it at 0)
+static VkDeviceMemory ahb_import(AHardwareBuffer* b, uint32_t* type_out, uint32_t* flags_out) {
+    static const auto props_fn =
+        (PFN_vkGetAndroidHardwareBufferPropertiesANDROID)vkGetDeviceProcAddr(dev.device, "vkGetAndroidHardwareBufferPropertiesANDROID");
+    if (!props_fn) return VK_NULL_HANDLE;
+    VkAndroidHardwareBufferPropertiesANDROID props{VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_PROPERTIES_ANDROID};
+    if (props_fn(dev.device, b, &props) != VK_SUCCESS || !props.memoryTypeBits) return VK_NULL_HANDLE;
+    uint32_t type = UINT32_MAX;   // (a host-coherent type among those it allows, else the first)
+    for (uint32_t i = 0; i < dev.memory.memoryTypeCount && type == UINT32_MAX; i++)
+        if ((props.memoryTypeBits >> i & 1) && (dev.memory.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)) type = i;
+    for (uint32_t i = 0; i < 32 && type == UINT32_MAX; i++)
+        if (props.memoryTypeBits >> i & 1) type = i;
+    VkImportAndroidHardwareBufferInfoANDROID imp{VK_STRUCTURE_TYPE_IMPORT_ANDROID_HARDWARE_BUFFER_INFO_ANDROID};
+    imp.buffer = b;
+    VkMemoryAllocateFlagsInfo fl{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
+    fl.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+    fl.pNext = &imp;
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.pNext = &fl;
+    ai.allocationSize = props.allocationSize;
+    ai.memoryTypeIndex = type;
+    VkDeviceMemory m = VK_NULL_HANDLE;
+    if (vkAllocateMemory(dev.device, &ai, nullptr, &m) != VK_SUCCESS) return VK_NULL_HANDLE;
+    if (type_out) *type_out = type;
+    if (flags_out) *flags_out = dev.memory.memoryTypes[type].propertyFlags;
+    return m;
+}
+/// A VkBuffer over bytes of the imported memory, from its start (a pool's: pool_lookup; the self-test's)
+static VkBuffer ahb_buffer(VkDeviceMemory m, uint64_t bytes) {
+    VkExternalMemoryBufferCreateInfo ext{VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO};
+    ext.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID;
+    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bi.pNext = &ext;
+    bi.size = bytes;
+    bi.usage = kUsage;
+    VkBuffer b = VK_NULL_HANDLE;
+    if (vkCreateBuffer(dev.device, &bi, nullptr, &b) != VK_SUCCESS) return VK_NULL_HANDLE;
+    if (vkBindBufferMemory(dev.device, b, m, 0) != VK_SUCCESS) {
+        vkDestroyBuffer(dev.device, b, nullptr);
+        return VK_NULL_HANDLE;
+    }
+    return b;
+}
+/// One command buffer run to its end on the queue (the self-test's copy and fill)
+static bool ahb_run(const std::function<void(VkCommandBuffer)>& record) {
+    VkCommandPoolCreateInfo pi{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    pi.queueFamilyIndex = dev.queue_family;
+    VkCommandPool pool = VK_NULL_HANDLE;
+    if (vkCreateCommandPool(dev.device, &pi, nullptr, &pool) != VK_SUCCESS) return false;
+    VkCommandBufferAllocateInfo cai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    cai.commandPool = pool, cai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY, cai.commandBufferCount = 1;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    VkFence fence = VK_NULL_HANDLE;
+    bool ok = vkAllocateCommandBuffers(dev.device, &cai, &cmd) == VK_SUCCESS && vkCreateFence(dev.device, &fi, nullptr, &fence) == VK_SUCCESS;
+    if (ok) {
+        VkCommandBufferBeginInfo bi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+        bi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+        vkBeginCommandBuffer(cmd, &bi);
+        record(cmd);
+        VkMemoryBarrier2 mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER_2};   // (the GPU's writes made visible to the host)
+        mb.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, mb.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+        mb.dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT, mb.dstAccessMask = VK_ACCESS_2_HOST_READ_BIT;
+        VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        di.memoryBarrierCount = 1, di.pMemoryBarriers = &mb;
+        vkCmdPipelineBarrier2(cmd, &di);
+        vkEndCommandBuffer(cmd);
+        VkCommandBufferSubmitInfo cb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO};
+        cb.commandBuffer = cmd;
+        VkSubmitInfo2 si{VK_STRUCTURE_TYPE_SUBMIT_INFO_2};
+        si.commandBufferInfoCount = 1, si.pCommandBufferInfos = &cb;
+        {
+            std::lock_guard lk(dev.present_mu);   // (one queue: submits take turns)
+            ok = vkQueueSubmit2(dev.queue, 1, &si, fence) == VK_SUCCESS;
+        }
+        ok = ok && vkWaitForFences(dev.device, 1, &fence, VK_TRUE, 2000000000ull) == VK_SUCCESS;
+    }
+    if (fence) vkDestroyFence(dev.device, fence, nullptr);
+    vkDestroyCommandPool(dev.device, pool, nullptr);
+    return ok;
+}
+static void ahb_sync(int fd, uint64_t flags) {
+    dma_buf_sync s{};
+    s.flags = flags;
+    ioctl(fd, DMA_BUF_IOCTL_SYNC, &s);
+}
+/// (once, at start) Whether an AHardwareBuffer mapped by its dma-buf at an address of ours and imported into Vulkan is the same
+/// memory for both, both ways, with no sync calls: the condition for guest pools in them
+static bool ahb_self_test() {
+    char line[1024];
+    int at = snprintf(line, sizeof line, "vk: AHB guest memory self-test:");
+    const auto say = [&](const char* fmt, auto... a) {
+        if (at < (int)sizeof line) at += snprintf(line + at, sizeof line - at, fmt, a...);
+    };
+    const uint64_t bytes = 16ull << 20, probe = 64ull << 10;
+    bool ok = false;
+    AHardwareBuffer* b = nullptr;
+    uint8_t* map = nullptr;
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    VkBuffer buf = VK_NULL_HANDLE, rb = VK_NULL_HANDLE;
+    VmaAllocation rb_alloc = nullptr;
+    void* rb_map = nullptr;
+    do {
+        if (!dev.ahb_import) { say(" no VK_ANDROID_external_memory_android_hardware_buffer (or VK_EXT_queue_family_foreign)"); break; }
+        if (!ahb_load()) { say(" libnativewindow's AHardwareBuffer functions not found"); break; }
+        if (!(b = ahb_alloc(bytes))) { say(" alloc FAILED"); break; }
+        say(" alloc ok");
+        const int fd = ahb_fd(b);
+        if (fd < 0) { say(", no handle fd"); break; }
+        say(", handle fd %d", fd);
+        void* scratch = mmap(nullptr, bytes, PROT_NONE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);   // (an address of ours, as a pool's)
+        void* m = scratch == MAP_FAILED ? MAP_FAILED : mmap(scratch, bytes, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
+        if (m == MAP_FAILED) {
+            say(", mmap FAILED (errno %d)", errno);
+            if (scratch != MAP_FAILED) munmap(scratch, bytes);
+            break;
+        }
+        map = (uint8_t*)m;
+        say(", mmap ok");
+        uint32_t type = 0, flags = 0;
+        if (!(mem = ahb_import(b, &type, &flags)) || !(buf = ahb_buffer(mem, bytes))) { say(", import FAILED"); break; }
+        say(", import ok (type %u flags %#x)", type, flags);
+        if (!create_buffer(probe, VK_BUFFER_USAGE_TRANSFER_DST_BIT, true, rb, rb_alloc, &rb_map, true) || !rb_map) {
+            say(", no readback buffer");
+            break;
+        }
+        // (CPU -> GPU: a pattern written through the mapping, copied by the GPU, read back)
+        uint32_t* words = (uint32_t*)map;
+        for (uint32_t i = 0; i < probe / 4; i++) words[i] = 0x9E3779B9u * (i + 1);
+        bool c2g = false, c2g_sync = false;
+        for (int pass = 0; pass < 2 && !c2g; pass++) {
+            if (pass) ahb_sync(fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_WRITE);
+            memset(rb_map, 0, probe);
+            VkBufferCopy r{0, 0, probe};
+            if (!ahb_run([&](VkCommandBuffer cmd) { vkCmdCopyBuffer(cmd, buf, rb, 1, &r); })) break;
+            c2g = !memcmp(rb_map, map, probe), c2g_sync = c2g && pass;
+        }
+        say(", CPU->GPU %s", c2g ? (c2g_sync ? "ok after DMA_BUF_IOCTL_SYNC" : "ok") : "FAILED");
+        // (GPU -> CPU: three rounds of a fill by the GPU over lines the CPU has just read and written (so a cached, non-coherent
+        // mapping would keep its stale lines), read through the mapping)
+        bool g2c = true, g2c_sync = false;
+        volatile uint32_t* probe_words = (volatile uint32_t*)(map + (1 << 20));
+        static const uint32_t fills[3] = {0xA5C3E1F0u, 0x0F1E2D3Cu, 0x5A5A0000u};
+        for (int round = 0; round < 3 && g2c; round++) {
+            uint32_t seen = 0;
+            for (uint64_t i = 0; i < probe / 4; i++) seen += probe_words[i];
+            for (uint64_t i = 0; i < probe / 4; i++) probe_words[i] = ~fills[round] ^ (uint32_t)i ^ (seen & 1);
+            if (!ahb_run([&](VkCommandBuffer cmd) { vkCmdFillBuffer(cmd, buf, 1 << 20, probe, fills[round]); })) { g2c = false; break; }
+            bool same = true;
+            for (int pass = 0; pass < 2; pass++) {
+                if (pass) ahb_sync(fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ), g2c_sync = true;
+                same = true;
+                for (uint64_t i = 0; i < probe / 4 && same; i++) same = probe_words[i] == fills[round];
+                if (same) break;
+            }
+            g2c = same;
+        }
+        say(", GPU->CPU %s", g2c ? (g2c_sync ? "ok after DMA_BUF_IOCTL_SYNC" : "ok (3 rounds over primed lines)") : "FAILED");
+        // (and the mapping's speed against the heap's: an uncached or write-combined one would leave the game crawling over it)
+        double ahb_w = 0, ahb_r = 0, heap_w = 0, heap_r = 0;
+        {
+            std::vector<uint8_t> a(bytes, 1), h(bytes, 2);
+            using clk = std::chrono::steady_clock;
+            const auto mbs = [&](uint8_t* dst, const uint8_t* src) {
+                const auto t0 = clk::now();
+                memcpy(dst, src, bytes);
+                const double s = std::chrono::duration<double>(clk::now() - t0).count();
+                return s > 0 ? (double)(bytes >> 20) / s : 1e9;
+            };
+            memcpy(map, a.data(), bytes);   // (the mapping's pages faulted in first, as the heap's are: speed, not first touch)
+            for (int run = 0; run < 3; run++) {   // (the best of three: a scheduling hiccup must not fail a good mapping)
+                ahb_w = std::max(ahb_w, mbs(map, a.data())), ahb_r = std::max(ahb_r, mbs(a.data(), map));
+                heap_w = std::max(heap_w, mbs(h.data(), a.data())), heap_r = std::max(heap_r, mbs(a.data(), h.data()));
+            }
+        }
+        const bool fast = ahb_w * 4 >= heap_w && ahb_r * 4 >= heap_r;
+        say(", memcpy MB/s: mapping write %.0f read %.0f, heap write %.0f read %.0f%s", ahb_w, ahb_r, heap_w, heap_r,
+            fast ? "" : " (the mapping is over 4x slower: uncached?)");
+        ok = c2g && g2c && !c2g_sync && !g2c_sync && fast;
+        say(ok ? " (no sync needed): guest pools in AHardwareBuffers on" : ": guest pools stay copied");
+    } while (false);
+    if (rb) destroy_buffer(rb, rb_alloc);
+    if (buf) vkDestroyBuffer(dev.device, buf, nullptr);
+    if (mem) vkFreeMemory(dev.device, mem, nullptr);
+    if (map) munmap(map, bytes);
+    if (b) ahb_api.release(b);
+    logf("%s", line);
+    return ok;
+}
+/// (memory_pool_created) A new pool's guest pages put in an AHardwareBuffer, when there is room under RX_VK_AHB_MB. The lock is
+/// held to check and reserve the range and its bytes, and to publish the region; the allocation, copy and mapping run outside it,
+/// so a lookup (pool_lookup, under pools_mu) does not wait on a big pool's making
+static void ahb_back(uint64_t gpu, uint64_t size) {
+    static const uint64_t cap = (uint64_t)(getenv("RX_VK_AHB_MB") ? std::max(0, atoi(getenv("RX_VK_AHB_MB"))) : 2048) << 20;
+    static std::vector<std::pair<uint64_t, uint64_t>> reserved;   // (ranges being made: ahb_mu)
+    static std::atomic<int> considered{0};
+    const uint64_t lo = gpu, hi = gpu + size;
+    if (!ahb_ok.load() || !size || gpu >= (1ull << 40)) return;
+    const bool tell = considered++ < 16;
+    const auto skip = [&](const char* why) {
+        if (tell) logf("vk: AHB: pool %#llx+%#llx (%llu MB) %s", (unsigned long long)lo, (unsigned long long)size, (unsigned long long)(size >> 20), why);
+    };
+    if ((lo & 4095) || (size & 4095)) return skip("not whole pages: copied");
+    {
+        std::lock_guard lk(ahb_mu);
+        for (const AhbRegion& r : ahb_regions)
+            if (r.lo < hi && lo < r.hi) return skip("over one already shared");
+        for (const auto& r : reserved)
+            if (r.first < hi && lo < r.second) return skip("over one being made");
+        if (ahb_bytes + size > cap) {
+            static bool told;
+            if (!told) {
+                told = true;
+                logf("vk: AHB guest pools: %llu MB used of %llu (RX_VK_AHB_MB): this pool of %llu MB and those past the cap copied",
+                     (unsigned long long)(ahb_bytes >> 20), (unsigned long long)(cap >> 20), (unsigned long long)(size >> 20));
+            }
+            return skip(size > cap ? "larger than RX_VK_AHB_MB: copied" : "past RX_VK_AHB_MB: copied");
+        }
+        ahb_bytes += size;
+        reserved.push_back({lo, hi});
+    }
+    const auto unreserve = [&]() {   // (ahb_mu held)
+        for (size_t i = 0; i < reserved.size(); i++)
+            if (reserved[i].first == lo) { reserved.erase(reserved.begin() + (ptrdiff_t)i); break; }
+    };
+    AHardwareBuffer* b = ahb_alloc(size);
+    const int fd = b ? ahb_fd(b) : -1;
+    void* tmp = fd >= 0 ? mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0) : MAP_FAILED;
+    VkDeviceMemory mem = tmp != MAP_FAILED ? ahb_import(b, nullptr, nullptr) : VK_NULL_HANDLE;
+    uint8_t* guest = host->guest_base() + lo;
+    bool placed = false;
+    if (mem) {
+        memcpy(tmp, guest, size);   // (what the game put there before it made the pool)
+        placed = mmap(guest, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0) == (void*)guest;
+    }
+    const int err = errno;
+    if (mem && !placed) {   // (a MAP_FIXED that failed may have unmapped the range already: anonymous pages again, the copy back in)
+        if (mmap(guest, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) == (void*)guest) {
+            memcpy(guest, tmp, size);
+            logf("vk: pool %#llx+%#llx: its pages put back as they were after the mapping failed", (unsigned long long)lo, (unsigned long long)size);
+        } else {
+            logf("vk: pool %#llx+%#llx: ITS GUEST PAGES COULD NOT BE PUT BACK (errno %d): the game will fault there", (unsigned long long)lo,
+                 (unsigned long long)size, errno);
+        }
+    }
+    if (tmp != MAP_FAILED) munmap(tmp, size);
+    if (!placed) {
+        static int told;
+        if (told++ < 8)
+            logf("vk: pool %#llx+%#llx not put in an AHardwareBuffer (alloc %d, fd %d, import %d, errno %d): copied",
+                 (unsigned long long)lo, (unsigned long long)size, b != nullptr, fd, mem != VK_NULL_HANDLE, err);
+        if (mem) vkFreeMemory(dev.device, mem, nullptr);
+        if (b) ahb_api.release(b);
+        std::lock_guard lk(ahb_mu);
+        ahb_bytes -= size;
+        unreserve();
+        return;
+    }
+    size_t n = 0;
+    uint64_t total = 0;
+    {
+        std::lock_guard lk(ahb_mu);
+        unreserve();
+        ahb_regions.push_back({lo, hi, b, mem});
+        n = ahb_regions.size(), total = ahb_bytes;
+    }
+    if (tell) skip("shared (an AHardwareBuffer)");
+    if (n <= 4 || n % 16 == 0)
+        logf("vk: AHB guest pools: %zu (%llu MB); the last %#llx+%#llx", n, (unsigned long long)(total >> 20), (unsigned long long)lo,
+             (unsigned long long)size);
+}
+/// (pool_lookup, import given up) The AHB region holding [guest, guest + size), if any
+static bool ahb_region_of(uint64_t guest, uint64_t size, AhbRegion* out) {
+    if (!ahb_ok.load()) return false;
+    std::lock_guard lk(ahb_mu);
+    for (const AhbRegion& r : ahb_regions)
+        if (guest >= r.lo && guest < r.hi && size <= r.hi - guest) return *out = r, true;
+    return false;
+}
+static bool ahb_overlaps(uint64_t lo, uint64_t hi) {
+    if (!ahb_ok.load()) return false;
+    std::lock_guard lk(ahb_mu);
+    for (const AhbRegion& r : ahb_regions)
+        if (r.lo < hi && lo < r.hi) return true;
+    return false;
+}
+#endif
 
 bool memory_init() {
 #ifdef __ANDROID__
@@ -699,7 +1035,7 @@ bool memory_init() {
         int (*ready)() = lib ? (int (*)())dlsym(lib, "hookshot_import_ready") : nullptr;
         adreno_import = lib ? (int (*)(void*, unsigned long long))dlsym(lib, "hookshot_import_user_mem") : nullptr;
         adreno_taken = lib ? (int (*)())dlsym(lib, "hookshot_import_taken") : nullptr;
-        if (ready && adreno_import && adreno_taken && ready()) {
+        if (!ahb_wanted() && ready && adreno_import && adreno_taken && ready()) {   // (HOS_GUEST_MEM=ahb: not this import)
             via_adreno = true;
             dev.external_memory_host = true;   // (what the rest of this file asks before it imports)
             logf("vk: no VK_EXT_external_memory_host: guest memory through libadrenotools' import (the device's own driver)");
@@ -711,6 +1047,7 @@ bool memory_init() {
             logf("vk: no VK_EXT_external_memory_host and no libadrenotools import (%s): guest memory not imported",
                  at && !atoi(at) ? "HOS_ADRENOTOOLS=0" : "a custom driver, or the import not loaded");
         }
+        if (adreno_dead && ahb_wanted()) ahb_ok = ahb_self_test();   // (HOS_GUEST_MEM=ahb)
     }
 #endif
     if (!dev.external_memory_host) {
@@ -2107,7 +2444,25 @@ void span_game_pools(uint64_t& lo, uint64_t& hi, uint64_t chunk) {
 Pool* pool_lookup(uint64_t guest, uint64_t size) {
     if (guest_pools.empty()) return nullptr;
 #ifdef __ANDROID__
-    if (via_adreno && adreno_dead) return nullptr;   // (no import can take: not planned, tried and logged ~3000 times a second)
+    if (via_adreno && adreno_dead) {   // (no import can take: not planned, tried and logged ~3000 times a second)
+        // (but a pool in an AHardwareBuffer (HOS_GUEST_MEM=ahb) is imported whole: a VkBuffer of its own over the shared memory.
+        // Its memory belongs to the region, never freed with the pool: memory stays null)
+        AhbRegion r;
+        if (!ahb_region_of(guest, size, &r)) return nullptr;
+        auto imp = imported.find(r.lo);
+        if (imp == imported.end()) {
+            Pool p;
+            p.lo = r.lo, p.hi = r.hi;
+            if (!(p.buffer = ahb_buffer(r.memory, r.hi - r.lo))) return nullptr;
+            VkBufferDeviceAddressInfo da{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+            da.buffer = p.buffer;
+            p.address = vkGetBufferDeviceAddress(dev.device, &da);
+            imp = imported.emplace(p.lo, p).first;
+            guest_pages_set(p.lo, p.hi, p.address);
+        }
+        imp->second.range_lo = guest, imp->second.range_hi = guest + size;
+        return last_pool = &imp->second;
+    }
 #endif
     bg_drain();
     auto it = std::upper_bound(guest_pools.begin(), guest_pools.end(), guest,
@@ -2706,6 +3061,9 @@ BufferRef gpu_buffer(uint64_t gpu, uint64_t size) {
 }
 
 void memory_pool_created(uint64_t gpu, uint64_t size) {
+#ifdef __ANDROID__
+    ahb_back(gpu, size);   // (HOS_GUEST_MEM=ahb, the self-test passed: its pages shared with the GPU from now on)
+#endif
     // (RX_VK_BG_IMPORT=1 only: imported eagerly, every pool the game made, most never used by the GPU, the thread's
     // page locking stalled the game's threads (3-7 fps); chunked imports at first use are the default)
     static const bool on = env_on("RX_VK_BG_IMPORT");
@@ -2720,6 +3078,9 @@ void memory_pool_created(uint64_t gpu, uint64_t size) {
 }
 
 int memory_guest_imported(uint64_t lo, uint64_t hi) {
+#ifdef __ANDROID__
+    if (ahb_overlaps(lo, hi)) return 1;   // (shared pages: zeroed when freed, not discarded, as an import's)
+#endif
     std::lock_guard lk(pools_mu);
     auto it = imported.upper_bound(hi);   // (pools by lo: those starting below hi, the last ones checked first)
     while (it != imported.begin()) {
