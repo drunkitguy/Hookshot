@@ -91,6 +91,9 @@ __attribute__((visibility("default"))) int SDL_main(int argc, char **argv) {
     LOGI("game folder: %s", game);
     chdir(game);
     custom_driver(game, sdl_path("SDL_AndroidGetInternalStoragePath", "SDL_GetAndroidInternalStoragePath"));
+    /* (an app's stderr is /dev/null, and a valid one: the game opens hookshot_log.txt only when it has none. Opened here,
+       so what the game says, and why it ends, is in the file the start screen shows) */
+    if (freopen("hookshot_log.txt", "w", stderr)) setvbuf(stderr, NULL, _IONBF, 0);
     char *args[] = {"hookshot", NULL};
     const int r = main(1, args);
     LOGI("the game returned %d (hookshot_log.txt in the game folder has the rest)", r);

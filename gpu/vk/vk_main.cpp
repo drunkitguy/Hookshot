@@ -112,14 +112,15 @@ bool create_instance() {
     const uint32_t n_exts = 2;
 #else
     // (linux: every window system's surface the loader has, for whichever one SDL's window is on: X11 or Wayland)
-    const char* exts[4] = {VK_KHR_SURFACE_EXTENSION_NAME};
+    const char* exts[5] = {VK_KHR_SURFACE_EXTENSION_NAME};
     uint32_t n_exts = 1;
     {
         uint32_t n = 0;
         vkEnumerateInstanceExtensionProperties(nullptr, &n, nullptr);
         std::vector<VkExtensionProperties> all(n);
         vkEnumerateInstanceExtensionProperties(nullptr, &n, all.data());
-        for (const char* want : {"VK_KHR_xlib_surface", "VK_KHR_xcb_surface", "VK_KHR_wayland_surface"})
+        // (VK_KHR_android_surface: SDL's window on Android)
+        for (const char* want : {"VK_KHR_xlib_surface", "VK_KHR_xcb_surface", "VK_KHR_wayland_surface", "VK_KHR_android_surface"})
             if (has_extension(all, want)) exts[n_exts++] = want;
     }
 #endif
