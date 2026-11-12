@@ -3960,7 +3960,11 @@ static bool present_out(uint32_t index, std::unique_lock<std::mutex>& qk) {
         if (logged++ < 8) logf("vk: present failed (VkResult %d%s)", (int)res, dev.present_queue_supported ? ", on the presents' own queue" : "");
     }
     frame_log_present();
+#ifdef __ANDROID__   // (SUBOPTIMAL on every present there while preTransform is not the panel's turn, vk_main.cpp; a resize comes as swap_resize)
+    if (res == VK_ERROR_OUT_OF_DATE_KHR) {
+#else
     if (res == VK_ERROR_OUT_OF_DATE_KHR || res == VK_SUBOPTIMAL_KHR) {
+#endif
         if (!qk.owns_lock()) qk.lock();
         create_swapchain(dev.swap_extent.width, dev.swap_extent.height);
     }

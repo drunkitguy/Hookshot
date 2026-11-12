@@ -610,10 +610,10 @@ bool create_swapchain(uint32_t width, uint32_t height) {
         return false;
     }
     if (caps.currentExtent.width != UINT32_MAX) width = caps.currentExtent.width, height = caps.currentExtent.height;
-    logf("vk: surface caps images %u..%u extent %ux%u..%ux%u usage %#x alpha %#x transform %#x",
+    logf("vk: surface caps images %u..%u extent %ux%u..%ux%u usage %#x alpha %#x transform %#x (current %#x)",
          caps.minImageCount, caps.maxImageCount, caps.minImageExtent.width, caps.minImageExtent.height,
          caps.maxImageExtent.width, caps.maxImageExtent.height, caps.supportedUsageFlags,
-         caps.supportedCompositeAlpha, caps.supportedTransforms);
+         caps.supportedCompositeAlpha, caps.supportedTransforms, caps.currentTransform);
     if (!(caps.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_DST_BIT)) {
         logf("vk: surface does not support transfer-destination swapchain images");
         return false;
@@ -714,7 +714,10 @@ bool create_swapchain(uint32_t width, uint32_t height) {
     // (hookshot) the overlays Dear ImGui draws (vk_imgui.cpp) render into it. Every surface allows it (the Vulkan spec)
     if (caps.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT)
         ci.imageUsage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
-    ci.preTransform = caps.currentTransform;
+    // (the picture is drawn upright at currentExtent: the compositor turns it. currentTransform on a panel that scans out
+    // portrait (Android, the AYN Thor) asked for an image drawn turned at the panel's own size: the picture came out on its side)
+    ci.preTransform = caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
+                                                                                       : caps.currentTransform;
     ci.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
     if (!(caps.supportedCompositeAlpha & ci.compositeAlpha)) {
         for (VkCompositeAlphaFlagBitsKHR alpha : {VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR,
@@ -780,9 +783,9 @@ bool create_swapchain(uint32_t width, uint32_t height) {
     dev.swap_extent = {width, height};
     dev.swap_images = std::move(images);
     dev.swap_spare = n > caps.minImageCount ? n - caps.minImageCount : 0;
-    logf("vk: swapchain %ux%u, %u images, %s (V-Sync %s)", width, height, n,
+    logf("vk: swapchain %ux%u, %u images, %s (V-Sync %s), transform %#x", width, height, n,
          mode == VK_PRESENT_MODE_MAILBOX_KHR ? "mailbox" : mode == VK_PRESENT_MODE_IMMEDIATE_KHR ? "immediate" : "fifo",
-         vsync == 1 ? "On" : vsync == 2 ? "Off" : "Auto");
+         vsync == 1 ? "On" : vsync == 2 ? "Off" : "Auto", (unsigned)ci.preTransform);
     swap_views_make(ci.imageUsage, mutable_view ? view_formats[1] : fmt.format);
     reflex_swapchain_created(sc);   // (NVIDIA Reflex: its sleep mode on the new swapchain)
     return true;

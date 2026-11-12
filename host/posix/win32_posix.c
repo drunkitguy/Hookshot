@@ -814,7 +814,10 @@ HMODULE LoadLibraryA(LPCSTR name) {
         /* (through libadrenotools, android/app/src/main/cpp/hookshot_adreno.cpp: a custom GPU driver the start screen
            chose, or the device's own with the memory import the renderer needs there) */
         const char *drv = getenv("HOOKSHOT_VK_DRIVER"), *dir = getenv("HOOKSHOT_VK_DRIVER_DIR"), *libs = getenv("HOOKSHOT_NATIVE_LIB_DIR");
-        if (libs && libs[0]) {
+        /* (HOS_ADRENOTOOLS=0 in hookshot_env.txt: the system's libvulkan.so as it is, no libadrenotools, no hook) */
+        const char *at = getenv("HOS_ADRENOTOOLS");
+        if (at && !atoi(at)) fprintf(stderr, "vk: HOS_ADRENOTOOLS=0: no libadrenotools, the system's libvulkan.so%s\n", drv && drv[0] ? " (the custom driver left out)" : "");
+        else if (libs && libs[0]) {
             const int custom = drv && drv[0] && dir;
             void *ad = dlopen("libhookshot_adreno.so", RTLD_NOW);
             void *(*open_vk)(const char *, const char *, const char *) =

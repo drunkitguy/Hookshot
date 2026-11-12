@@ -346,14 +346,14 @@ bool import_dma_buf(uint64_t lo, uint64_t hi, Pool& p) {
 static int (*adreno_import)(void*, unsigned long long);
 static int (*adreno_taken)();
 static bool via_adreno;
+static bool adreno_dead;   // (no allocation ever took the pages, or HOS_ADRENOTOOLS=0: not armed again, each arming leaks a KGSL object)
 
 static bool import_pool_adreno(uint8_t* ptr, uint64_t bytes, uint64_t lo, uint64_t hi, Pool& p) {
     static std::mutex mu;   // (one import waits for its allocation at a time)
     std::lock_guard<std::mutex> lk(mu);
     static uint32_t type = UINT32_MAX;   // (the memory type whose allocations take the import: found with the first pool)
     static int said;
-    static bool dead;   // (no allocation ever took the pages: not armed again, each arming leaks a KGSL object)
-    if (dead) {
+    if (adreno_dead) {
         import_remember_failure(lo, hi);
         return false;
     }
@@ -399,7 +399,7 @@ static bool import_pool_adreno(uint8_t* ptr, uint64_t bytes, uint64_t lo, uint64
         ok = false, why = "the buffer could not be bound";
     }
     if (!ok && allocated_any && type == UINT32_MAX && !strcmp(why, "no memory type's allocation took the pages")) {
-        dead = true;
+        adreno_dead = true;
         logf("vk: no memory type's allocation took a pool's pages: libadrenotools' import given up, guest memory not imported");
     }
     if (!ok) {
@@ -639,7 +639,8 @@ uint64_t memory_guest_pages() {
 bool memory_init() {
 #ifdef __ANDROID__
     if (!dev.external_memory_host) {
-        void* lib = dlopen("libhookshot_adreno.so", RTLD_NOW);
+        const char* at = getenv("HOS_ADRENOTOOLS");
+        void* lib = at && !atoi(at) ? nullptr : dlopen("libhookshot_adreno.so", RTLD_NOW);
         int (*ready)() = lib ? (int (*)())dlsym(lib, "hookshot_import_ready") : nullptr;
         adreno_import = lib ? (int (*)(void*, unsigned long long))dlsym(lib, "hookshot_import_user_mem") : nullptr;
         adreno_taken = lib ? (int (*)())dlsym(lib, "hookshot_import_taken") : nullptr;
@@ -647,6 +648,10 @@ bool memory_init() {
             via_adreno = true;
             dev.external_memory_host = true;   // (what the rest of this file asks before it imports)
             logf("vk: no VK_EXT_external_memory_host: guest memory through libadrenotools' import (the device's own driver)");
+        } else if (at && !atoi(at)) {   // (the replay as with the import given up: guest memory not imported)
+            via_adreno = adreno_dead = true;
+            dev.external_memory_host = true;
+            logf("vk: HOS_ADRENOTOOLS=0: no VK_EXT_external_memory_host and no libadrenotools: guest memory not imported");
         } else {
             logf("vk: no VK_EXT_external_memory_host, and no libadrenotools import (it works with the device's own driver only: "
                  "choose \"Use the system driver\")");
