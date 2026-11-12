@@ -340,6 +340,71 @@ bool import_dma_buf(uint64_t lo, uint64_t hi, Pool& p) {
 }
 #endif
 
+#ifdef __ANDROID__
+// (android, Adreno's own driver: no VK_EXT_external_memory_host. libadrenotools hands the pool's pages to KGSL and has the
+// driver's next allocation of that size be them: android/app/src/main/cpp/hookshot_adreno.cpp)
+static int (*adreno_import)(void*, unsigned long long);
+static int (*adreno_taken)();
+static bool via_adreno;
+
+static bool import_pool_adreno(uint8_t* ptr, uint64_t bytes, uint64_t lo, uint64_t hi, Pool& p) {
+    static std::mutex mu;   // (one import waits for its allocation at a time)
+    std::lock_guard<std::mutex> lk(mu);
+    static uint32_t type = UINT32_MAX;   // (the memory type whose allocations take the import: found with the first pool)
+    static int said;
+    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bi.size = bytes;
+    bi.usage = kUsage;
+    if (vkCreateBuffer(dev.device, &bi, nullptr, &p.buffer) != VK_SUCCESS) {
+        import_remember_failure(lo, hi);
+        return false;
+    }
+    VkMemoryRequirements req{};
+    vkGetBufferMemoryRequirements(dev.device, p.buffer, &req);
+    const char* why = "no memory type's allocation took the pages";
+    bool ok = false;
+    if (req.size != bytes || ((uintptr_t)ptr & 4095) || (bytes & 4095)) why = "the pool is not whole pages, or the buffer asks for more than it";
+    else
+        for (uint32_t i = 0; i < dev.memory.memoryTypeCount && !ok; i++) {
+            if (type != UINT32_MAX && i != type) continue;
+            if (!(req.memoryTypeBits >> i & 1) || !(dev.memory.memoryTypes[i].propertyFlags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) continue;
+            if (!adreno_import(ptr, bytes)) {
+                why = "KGSL refused the pages";
+                break;
+            }
+            VkMemoryAllocateFlagsInfo fl{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_FLAGS_INFO};
+            fl.flags = VK_MEMORY_ALLOCATE_DEVICE_ADDRESS_BIT;
+            VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            ai.pNext = &fl;
+            ai.allocationSize = bytes;
+            ai.memoryTypeIndex = i;
+            if (vkAllocateMemory(dev.device, &ai, nullptr, &p.memory) != VK_SUCCESS) continue;
+            if (adreno_taken()) {
+                if (type == UINT32_MAX) logf("vk: guest pools are the driver's allocations of memory type %u (flags %#x)", i, dev.memory.memoryTypes[i].propertyFlags);
+                type = i, ok = true;
+            } else {
+                vkFreeMemory(dev.device, p.memory, nullptr);
+                p.memory = VK_NULL_HANDLE;
+            }
+        }
+    if (ok && vkBindBufferMemory(dev.device, p.buffer, p.memory, 0) != VK_SUCCESS) {
+        vkFreeMemory(dev.device, p.memory, nullptr);
+        ok = false, why = "the buffer could not be bound";
+    }
+    if (!ok) {
+        if (said++ < 8) logf("vk: pool %#llx..%#llx (%llu KB) not imported through libadrenotools: %s", (unsigned long long)lo, (unsigned long long)hi, (unsigned long long)(bytes >> 10), why);
+        destroy_import_buffer(p.buffer);
+        p.buffer = VK_NULL_HANDLE, p.memory = VK_NULL_HANDLE;
+        import_remember_failure(lo, hi);
+        return false;
+    }
+    VkBufferDeviceAddressInfo da{VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO};
+    da.buffer = p.buffer;
+    p.address = vkGetBufferDeviceAddress(dev.device, &da);
+    return true;
+}
+#endif
+
 bool import_pool(uint64_t lo, uint64_t hi, Pool& p) {
     import_cooling = false;
     import_result = VK_SUCCESS;
@@ -387,6 +452,13 @@ bool import_pool(uint64_t lo, uint64_t hi, Pool& p) {
     if (import_dma_buf(lo, hi, p)) {
         t1 = t2 = t3 = t4 = clk::now();
         return true;
+    }
+#endif
+#ifdef __ANDROID__
+    if (via_adreno) {
+        const bool ok = import_pool_adreno(ptr, bytes, lo, hi, p);
+        t1 = t2 = t3 = t4 = clk::now();
+        return ok;
     }
 #endif
     // (the host allocations' memory type: the same for every pointer, asked once)
@@ -554,6 +626,22 @@ uint64_t memory_guest_pages() {
 }
 
 bool memory_init() {
+#ifdef __ANDROID__
+    if (!dev.external_memory_host) {
+        void* lib = dlopen("libhookshot_adreno.so", RTLD_NOW);
+        int (*ready)() = lib ? (int (*)())dlsym(lib, "hookshot_import_ready") : nullptr;
+        adreno_import = lib ? (int (*)(void*, unsigned long long))dlsym(lib, "hookshot_import_user_mem") : nullptr;
+        adreno_taken = lib ? (int (*)())dlsym(lib, "hookshot_import_taken") : nullptr;
+        if (ready && adreno_import && adreno_taken && ready()) {
+            via_adreno = true;
+            dev.external_memory_host = true;   // (what the rest of this file asks before it imports)
+            logf("vk: no VK_EXT_external_memory_host: guest memory through libadrenotools' import (the device's own driver)");
+        } else {
+            logf("vk: no VK_EXT_external_memory_host, and no libadrenotools import (it works with the device's own driver only: "
+                 "choose \"Use the system driver\")");
+        }
+    }
+#endif
     if (!dev.external_memory_host) {
         logf("vk: no VK_EXT_external_memory_host: the guest memory cannot be imported (needed for now)");
         return false;
@@ -566,6 +654,9 @@ bool memory_init() {
     hp.pNext = &p11;
     p11.pNext = &p13;
     p2.pNext = &hp;
+#ifdef __ANDROID__
+    if (via_adreno) p2.pNext = &p11;   // (not that extension's structure)
+#endif
     vkGetPhysicalDeviceProperties2(dev.physical, &p2);
     align = std::max<uint64_t>(hp.minImportedHostPointerAlignment, 4096);
     max_import_size = std::min(p11.maxMemoryAllocationSize, p13.maxBufferSize);

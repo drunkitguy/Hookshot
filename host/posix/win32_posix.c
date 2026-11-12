@@ -811,15 +811,17 @@ HMODULE LoadLibraryA(LPCSTR name) {
     /* (libraries load only from the APK's own folder, by bare name: x.dll beside the game is libx.so there, and the game's
        folder, shared storage, cannot hold code) */
     if (!strcasecmp(base, "vulkan-1.dll")) {
-        /* (a custom GPU driver, Turnip: host/posix/android_main.c found one in the game's driver folder. libadrenotools opens
-           the system's Vulkan loader with that driver in place of the device's own; android/README.md) */
+        /* (through libadrenotools, android/app/src/main/cpp/hookshot_adreno.cpp: a custom GPU driver the start screen
+           chose, or the device's own with the memory import the renderer needs there) */
         const char *drv = getenv("HOOKSHOT_VK_DRIVER"), *dir = getenv("HOOKSHOT_VK_DRIVER_DIR"), *libs = getenv("HOOKSHOT_NATIVE_LIB_DIR");
-        if (drv && drv[0] && dir && libs) {
+        if (libs && libs[0]) {
+            const int custom = drv && drv[0] && dir;
             void *ad = dlopen("libhookshot_adreno.so", RTLD_NOW);
             void *(*open_vk)(const char *, const char *, const char *) =
                 ad ? (void *(*)(const char *, const char *, const char *))dlsym(ad, "hookshot_open_vulkan") : NULL;
-            void *vk = open_vk ? open_vk(libs, dir, drv) : NULL;
-            fprintf(stderr, "vk: custom driver %s%s: %s\n", dir, drv, vk ? "loaded" : "NOT loaded, the device's own driver instead");
+            void *vk = open_vk ? open_vk(libs, custom ? dir : NULL, custom ? drv : NULL) : NULL;
+            if (custom) fprintf(stderr, "vk: custom driver %s%s: %s\n", dir, drv, vk ? "loaded" : "NOT loaded, the device's own driver instead");
+            else fprintf(stderr, "vk: the device's driver through libadrenotools (memory import): %s\n", vk ? "loaded" : "NOT loaded, plainly instead");
             if (vk) return (HMODULE)vk;
         }
     }

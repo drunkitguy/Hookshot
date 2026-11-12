@@ -261,10 +261,10 @@ public class LauncherActivity extends Activity {
                 placeImage();
                 String driver = prefs.getString("driver", null);
                 Os.setenv("HOOKSHOT_DIR", game.getPath(), true);
+                Os.setenv("HOOKSHOT_NATIVE_LIB_DIR", getApplicationInfo().nativeLibraryDir + "/", true);
                 if (driver != null && new File(drivers, driver).isFile()) {
                     Os.setenv("HOOKSHOT_VK_DRIVER", driver, true);
                     Os.setenv("HOOKSHOT_VK_DRIVER_DIR", drivers.getPath() + "/", true);
-                    Os.setenv("HOOKSHOT_NATIVE_LIB_DIR", getApplicationInfo().nativeLibraryDir + "/", true);
                 } else {
                     Os.unsetenv("HOOKSHOT_VK_DRIVER");
                 }
