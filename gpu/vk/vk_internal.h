@@ -129,6 +129,8 @@ BufferRef stream_copy_guest(uint64_t gpu, uint64_t n);   // vk_draw.cpp: guest m
 uint64_t recording_serial();                             // vk_draw.cpp: the recording being made (a stream copy is its own)
 int64_t copied_read_kb();                                // vk_memory.cpp: guest memory copied into the streams so far
 bool copy_reads_on();                                    // vk_memory.cpp: reads no pool holds copied into the streams
+extern std::atomic<uint64_t> texture_budget_cap;         // vk_texture.cpp: the textures' budget at most this (bytes, 0: no cap)
+extern std::atomic<int64_t> st_copy_refused[3];          // vk_memory.cpp: copied reads refused: over 8 MB, the recording's budget, the streams' cap
 /// Authored constants in the recording's stream: never recycled until its recording completes.
 /// Fill mapped, then flush memory through binding.offset + binding.size before GPU use.
 struct UniformUpload {
@@ -324,6 +326,7 @@ unsigned usable_cpus();   // vk_progcache.cpp
 /// (hookshot) Half the PC's CPUs (one a core where a core runs two threads: the translation's and the stage libraries' workers, at
 /// below normal priority), and never more than usable_cpus: on 12 of 24 CPUs, 6 workers made the translation 40% slower than 12
 unsigned half_cpus();   // vk_progcache.cpp
+unsigned compile_threads(unsigned dflt);   // vk_progcache.cpp: RX_VK_COMPILE_THREADS, else dflt
 /// (hookshot) The driver's shader cache folders' size, logged with when: at the start, after the prediction
 void driver_cache_log(const char* when);   // vk_draw.cpp
 /// (hookshot) At the start after a preparation, behind the game: a sample of its predicted pipelines asked of the driver without

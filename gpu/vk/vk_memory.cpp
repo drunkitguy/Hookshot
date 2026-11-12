@@ -20,6 +20,9 @@
 #include <deque>
 #include <unordered_map>
 #include <thread>
+#ifdef __ANDROID__
+#include <malloc.h>   // (mallinfo: memory_watch)
+#endif
 
 #define NOMINMAX
 #define WIN32_LEAN_AND_MEAN
@@ -636,8 +639,60 @@ uint64_t memory_guest_pages() {
     return guest_pages_address;
 }
 
+#ifdef __ANDROID__
+// (android) The app's memory, kept clear of lmkd: it killed every run 3-7 minutes in, the game's own memory (~4 GB of its window
+// touched) and the native heap filling the device with swap. A budget of 60% of the device's RAM (HOS_MEMORY_BUDGET_MB=<MB>: other)
+// for what the app holds and has swapped (VmRSS + VmSwap); the textures, which may be made again, are what gives way: at the first
+// tick over it 1024 MB at most, then halved down to 256 MB each tick still over. Not capped before: the driver's texture memory
+// (KGSL) is not in VmRSS or VmSwap, so a cap from the start only made textures again without freeing what is counted. Every 2 s;
+// a line every 30 s with the native heap, which a heavy scene took from 0.4 to 5.7 GB in one run (round 10)
+// shortcut: the cap only comes down, never back up; a relief step when the app stays far under its budget, if textures pop
+static uint64_t proc_kb(const char* file, const char* key) {
+    FILE* f = fopen(file, "r");
+    if (!f) return 0;
+    char line[256];
+    uint64_t kb = 0;
+    const size_t n = strlen(key);
+    while (fgets(line, sizeof line, f))
+        if (!strncmp(line, key, n)) { kb = strtoull(line + n, nullptr, 10); break; }
+    fclose(f);
+    return kb;
+}
+static void memory_watch_start() {
+    const uint64_t total_mb = proc_kb("/proc/meminfo", "MemTotal:") >> 10;
+    const char* e = getenv("HOS_MEMORY_BUDGET_MB");
+    const uint64_t budget_mb = e ? (uint64_t)std::max(256, atoi(e)) : total_mb * 6 / 10;
+    logf("vk: memory budget %llu MB (%s of %llu MB): over it, textures 1024 MB at most, then halved to 256 MB; copied-read streams "
+         "512 MB (RX_VK_STREAM_KEEP_MB); the rest the game's memory, the driver's and ours", (unsigned long long)budget_mb,
+         e ? "HOS_MEMORY_BUDGET_MB" : "60%", (unsigned long long)total_mb);
+    std::thread([budget_mb] {
+        SetThreadDescription(GetCurrentThread(), L"mkw_vk memory watch");
+        for (int tick = 1;; tick++) {
+            Sleep(2000);
+            const uint64_t rss = proc_kb("/proc/self/status", "VmRSS:") >> 10, swap = proc_kb("/proc/self/status", "VmSwap:") >> 10;
+            const uint64_t cap = texture_budget_cap.load();
+            if (rss + swap > budget_mb && (!cap || cap > (256ull << 20))) {
+                const uint64_t next = cap ? std::max<uint64_t>(cap / 2, 256ull << 20) : 1024ull << 20;
+                texture_budget_cap = next;
+                const uint64_t native = (uint64_t)mallinfo().uordblks >> 20;
+                logf("vk: memory over budget: %llu MB held + %llu MB swapped of %llu MB (native heap %llu MB): textures down to %llu MB",
+                     (unsigned long long)rss, (unsigned long long)swap, (unsigned long long)budget_mb, (unsigned long long)native,
+                     (unsigned long long)(next >> 20));
+            } else if (tick % 15 == 0) {
+                const uint64_t native = (uint64_t)mallinfo().uordblks >> 20;
+                logf("vk: memory: %llu MB held + %llu MB swapped of %llu MB; native heap %llu MB; textures at most %llu MB",
+                     (unsigned long long)rss, (unsigned long long)swap, (unsigned long long)budget_mb, (unsigned long long)native,
+                     (unsigned long long)(cap >> 20));
+            }
+        }
+    }).detach();
+}
+#endif
+
 bool memory_init() {
 #ifdef __ANDROID__
+    static std::once_flag watching;
+    std::call_once(watching, memory_watch_start);
     if (!dev.external_memory_host) {
         const char* at = getenv("HOS_ADRENOTOOLS");
         void* lib = at && !atoi(at) ? nullptr : dlopen("libhookshot_adreno.so", RTLD_NOW);
@@ -2797,6 +2852,20 @@ bool copy_reads_on() {
 }
 constexpr uint64_t kCopyReadMax = 8ull << 20;
 std::atomic<int64_t> st_copy_reads{0}, st_copy_read_kb{0};
+std::atomic<int64_t> st_copy_refused[3]{};   // (over kCopyReadMax, the recording's budget, the streams' cap: copy_refusals_log)
+std::atomic<uint64_t> st_copy_refused_largest{0};
+/// (once a second at most, when any were refused: what the draws left out were waiting on)
+void copy_refusals_log() {
+    static std::atomic<uint64_t> last{0};
+    const uint64_t now = GetTickCount64();
+    uint64_t was = last.load(std::memory_order_relaxed);
+    if (now - was < 1000 || !last.compare_exchange_strong(was, now)) return;
+    const int64_t big = st_copy_refused[0].exchange(0), rec = st_copy_refused[1].exchange(0), cap = st_copy_refused[2].exchange(0);
+    if (big || rec || cap)
+        logf("vk: copied reads refused in the last second: %lld over 8 MB (the largest %llu KB), %lld past the recording's budget, "
+             "%lld past the streams' cap", (long long)big, (unsigned long long)(st_copy_refused_largest.exchange(0) >> 10),
+             (long long)rec, (long long)cap);
+}
 int64_t copied_read_kb() { return st_copy_read_kb.load(); }
 // (a range copied once a recording: every draw that bound the same vertex buffer copied it again, ~150 MB/s. The bytes are the
 // submission's (memory_read_as_submitted), so they hold for the recording unless the replay itself writes guest memory
@@ -2874,8 +2943,16 @@ BufferRef gpu_buffer_bind(uint64_t gpu, uint64_t size, bool written) {
         }
     }
     Pool* p = pool_of(guest, size);
-    if (!p && !written && size && size <= kCopyReadMax && copy_reads_on()) {
-        lk.unlock();   // (memory_read_as_submitted takes pools_mu)
+    if (!p && !written && size > kCopyReadMax && copy_reads_on()) {
+        st_copy_refused[0]++;
+        for (uint64_t l = st_copy_refused_largest.load(); size > l && !st_copy_refused_largest.compare_exchange_weak(l, size);) {}
+        lk.unlock();
+        copy_refusals_log();
+        return {};
+    }
+    if (!p && !written && size && copy_reads_on()) {
+        lk.unlock();   // (memory_read_as_submitted takes pools_mu; and no log line under it)
+        copy_refusals_log();
         CopyMemo& m = copy_memo[bind_slot(gpu, size)];
         const uint64_t serial = recording_serial();
         if (m.ref && m.gpu == gpu && m.size == size && m.serial == serial && !replay_wrote_since(m.wgen, gpu, gpu + size))

@@ -639,5 +639,14 @@ unsigned usable_cpus() {
 unsigned half_cpus() {
     return std::max(1u, std::min(std::max(1u, std::thread::hardware_concurrency()) / 2, usable_cpus()));
 }
+// (hookshot) RX_VK_COMPILE_THREADS=<n>: the threads that translate shaders and build pipelines, the preparation's at start and the
+// background workers in play (vk_jobs.cpp). A test: each compile holds the translator's and the driver's working memory, and on
+// the AYN Thor the native heap reached 5.7 GB while Turnip built the gameplay pipelines (round 10)
+unsigned compile_threads(unsigned dflt) {
+    static const int n = getenv("RX_VK_COMPILE_THREADS") ? std::clamp(atoi(getenv("RX_VK_COMPILE_THREADS")), 1, 32) : 0;
+    static std::atomic<bool> said{false};
+    if (n && !said.exchange(true)) logf("vk: %d threads translate shaders and build pipelines (RX_VK_COMPILE_THREADS)", n);
+    return n ? (unsigned)n : dflt;
+}
 
 } // namespace mkwvk

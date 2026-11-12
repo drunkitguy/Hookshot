@@ -71,7 +71,8 @@ public class LauncherActivity extends Activity {
         nupButton = button(box, "Select your .nup file", v -> pick(PICK_NUP));
         driverText = text(box, "", 16);
         driverButton = button(box, "Select a GPU driver (.so or .zip)", v -> pick(PICK_DRIVER));
-        systemButton = button(box, "Use the system driver", v -> { prefs.edit().remove("driver").apply(); refresh(); });
+        // ("system": chosen, not just none: with none, the game's default driver is used when present, win32_posix.c)
+        systemButton = button(box, "Use the system driver", v -> { prefs.edit().putString("driver", "system").apply(); refresh(); });
         launchButton = button(box, "Launch", v -> launch());
         button(box, "Copy the log", v -> ((ClipboardManager) getSystemService(CLIPBOARD_SERVICE))
                 .setPrimaryClip(ClipData.newPlainText("hookshot log", logText.getText())));
@@ -112,13 +113,15 @@ public class LauncherActivity extends Activity {
 
     private void refresh() {
         String driver = prefs.getString("driver", null);
-        if (driver != null && !new File(drivers, driver).isFile()) driver = null;
+        final boolean system = "system".equals(driver);
+        if (driver != null && !system && !new File(drivers, driver).isFile()) driver = null;
         gameText.setText(romfsReady() ? "Game: unpacked and ready (" + game + ")"
                 : "Game: not unpacked yet. Select your .nup (version 131072); it is unpacked once, about 27 GB.");
-        driverText.setText("GPU driver: " + (driver != null ? driver : "the system's"));
+        driverText.setText("GPU driver: " + (system ? "the system's" : driver != null ? driver
+                : "the default (turnip_t30.so or vulkan.purple.so when present, else the system's)"));
         nupButton.setEnabled(!busy);
         driverButton.setEnabled(!busy);
-        systemButton.setEnabled(!busy && driver != null);
+        systemButton.setEnabled(!busy && !system);
         launchButton.setEnabled(!busy && romfsReady());
     }
 
@@ -262,7 +265,9 @@ public class LauncherActivity extends Activity {
                 String driver = prefs.getString("driver", null);
                 Os.setenv("HOOKSHOT_DIR", game.getPath(), true);
                 Os.setenv("HOOKSHOT_NATIVE_LIB_DIR", getApplicationInfo().nativeLibraryDir + "/", true);
-                if (driver != null && new File(drivers, driver).isFile()) {
+                if ("system".equals(driver)) {
+                    Os.setenv("HOOKSHOT_VK_DRIVER", "system", true);
+                } else if (driver != null && new File(drivers, driver).isFile()) {
                     Os.setenv("HOOKSHOT_VK_DRIVER", driver, true);
                     Os.setenv("HOOKSHOT_VK_DRIVER_DIR", drivers.getPath() + "/", true);
                 } else {

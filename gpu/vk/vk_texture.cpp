@@ -60,6 +60,7 @@
 #include "vk_work.h"   // (after the others: counts the commands that do GPU work, for full_barrier)
 
 namespace mkwvk {
+std::atomic<uint64_t> texture_budget_cap{0};   // (bytes, 0: none; vk_memory.cpp memory_watch)
 namespace {
 
 uint64_t mix(uint64_t h, uint64_t v) {
@@ -3914,6 +3915,8 @@ void texture_frame(uint64_t completed) {
         // Safety clamp: do not exceed 75% of driver-allowed memory on constrained VRAM (prevents VK_ERROR_DEVICE_LOST)
         budget = std::min(budget, (allowed / 4) * 3);
     }
+    // (hookshot, android: the process's memory budget, vk_memory.cpp memory_watch: textures first when the app nears lmkd)
+    if (const uint64_t cap = texture_budget_cap.load(std::memory_order_relaxed); cap && budget > cap) budget = cap;
     // (near what the driver allows, the budget shrinks by the excess. The excess of what the process holds less the
     // free space in VMA's blocks, which new images take before VMA makes a block: measured by the blocks alone, the
     // textures evicted freed space inside them that the driver still counted, so 10 frames later the budget shrank

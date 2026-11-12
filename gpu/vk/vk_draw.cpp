@@ -1690,7 +1690,7 @@ void state_list_prepare(void (*progress)(size_t done, size_t total), bool open_s
         }
     };
     std::vector<std::thread> threads;
-    for (unsigned i = 0; i < std::clamp(half_cpus(), 1u, 32u); i++) threads.emplace_back(worker);
+    for (unsigned i = 0; i < compile_threads(std::clamp(half_cpus(), 1u, 32u)); i++) threads.emplace_back(worker);
     for (std::thread& t : threads) t.join();
     // then each pipeline, noted as a draw would note it
     std::unordered_set<uint64_t> keys;
@@ -1732,7 +1732,7 @@ void state_list_prepare(void (*progress)(size_t done, size_t total), bool open_s
         }
     };
     threads.clear();
-    for (unsigned i = 0; i < std::clamp(half_cpus(), 1u, 32u); i++) threads.emplace_back(variant_worker);
+    for (unsigned i = 0; i < compile_threads(std::clamp(half_cpus(), 1u, 32u)); i++) threads.emplace_back(variant_worker);
     for (std::thread& t : threads) t.join();
     size_t noted_n = 0, no_variant = 0, noted_mesh = 0, noted_fallback = 0;
     auto s = std::make_unique<NvnState>();
@@ -7735,7 +7735,7 @@ bool warm_libraries(void (*progress)(size_t done, size_t total)) {
         }
     };
     std::vector<std::thread> threads;
-    for (unsigned i = 0; i < std::clamp(half_cpus(), 1u, 32u); i++) threads.emplace_back(worker);
+    for (unsigned i = 0; i < compile_threads(std::clamp(half_cpus(), 1u, 32u)); i++) threads.emplace_back(worker);
     while (done.load() < total && !prepare_stopped()) {
         if (progress) progress(done.load(), total);
         Sleep(100);
@@ -7909,7 +7909,7 @@ bool prepare_run(void (*progress)(size_t done, size_t total), bool background, b
     const unsigned cpus = usable_cpus();
     // (in play: a quarter of the CPUs, two to four, the game's own threads before them)
     const unsigned quarter = std::clamp(std::max(1u, std::thread::hardware_concurrency()) / 4, 2u, 4u);
-    const unsigned workers = background ? std::min(quarter, cpus) : std::clamp(half_cpus(), 1u, 32u);
+    const unsigned workers = compile_threads(background ? std::min(quarter, cpus) : std::clamp(half_cpus(), 1u, 32u));
     for (unsigned i = 0; i < workers; i++) threads.emplace_back(worker);
     while (done.load() < total && !prepare_stopped()) {
         if (progress) progress(done.load() / 3, programs);   // (in programs, as the log counts them, not programs times variants)
@@ -9075,6 +9075,7 @@ BufferRef stream_copy_guest(uint64_t gpu, uint64_t n) {
     // left out, as without the copies)
     static const uint64_t budget = (getenv("RX_VK_COPY_READS_MB") ? (uint64_t)std::max(1, atoi(getenv("RX_VK_COPY_READS_MB"))) : 64u) << 20;
     if (cur->before + cur->used + n > budget || stream_extra.load() > stream_keep_cap()) {
+        st_copy_refused[cur->before + cur->used + n > budget ? 1 : 2]++;
         static std::atomic<bool> said{false};
         if (!said.exchange(true))
             logf("vk: copied reads: the recording's %llu MB budget or the streams' %llu MB is spent, draws left out "

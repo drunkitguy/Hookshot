@@ -17,7 +17,7 @@ setjmp are tested under qemu. **Nothing has been run on a device.** Expect to wo
 | Faults | pc, sp, fp and the write bit (ESR) from the arm64 signal context, `host/posix/win32_posix.c` |
 | Libraries | `libmain.so` is linked `-z global` so the back end finds the host's symbols; all load by bare name from the APK: `libmain.so` (the game), `libhookshot_vk.so`, `libSDL2.so`, `libhookshot_adreno.so` |
 | Game folder | `/sdcard/Android/data/io.github.hookshot/files` (`HOOKSHOT_DIR`), `host/posix/android_main.c` |
-| GPU driver | the device's, or a Turnip `.so` in `<game folder>/driver/`, loaded through libadrenotools |
+| GPU driver | the device's, or a Turnip `.so` in `<game folder>/driver/`, loaded through libadrenotools. With no driver chosen, turnip_t30.so or vulkan.purple.so in `files/driver/` is used when present; "Use the system driver" keeps the device's |
 | Switches | `hookshot_env.txt` in the game folder, as elsewhere (an app has no environment) |
 
 ## Build
@@ -52,9 +52,9 @@ the compile is new).
 
 1. Start the app once so its folder exists, then copy the PC game folder's contents (`image.bin`, `romfs`, and the rest,
    without the executables and DLLs) to `/sdcard/Android/data/io.github.hookshot/files/`.
-2. Turnip: unpack the driver's `.so` into `files/driver/` (one driver: the first `.so` found is used).
-3. Memory: the game is given 9809 MB as on the console. On a 12 GB device try `HOS_MEMORY_MB=7000` in `hookshot_env.txt` if
-   Android kills the app; how low the game accepts is not known.
+2. Turnip: unpack the driver's `.so` into `files/driver/` (one driver: the first `.so` found is used). With no driver chosen,
+   turnip_t30.so or vulkan.purple.so in `files/driver/` is used when present; "Use the system driver" keeps the device's.
+3. Memory: 9500 MB by default on Android (the lowest the game boots with); `HOS_MEMORY_MB=<MB>` in `hookshot_env.txt` for another.
 
 ## Known gaps
 

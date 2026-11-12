@@ -50,8 +50,14 @@ void hos_mem_init(uint64_t image_end) {
     hos_log("memory: %llu MB for the game (window %llu MB)", (unsigned long long)(hos_total_memory >> 20),
             (unsigned long long)(HOS_SPACE_END >> 20));
 #else
-    /* mkw-recomp: a Switch 2 application gets 9809 MB (Eglantine's KSystemControl, 12 GB arrangement) */
+    /* mkw-recomp: a Switch 2 application gets 9809 MB (Eglantine's KSystemControl, 12 GB arrangement). (android: 9500, ~300 MB
+       less of heap on a 12 GB phone; the game boots and plays with it on the AYN Thor, and dies at boot with 8500 or less: its
+       2.4 GB GPU pool finds no storage) */
+#ifdef __ANDROID__
+    hos_total_memory = (mb ? strtoull(mb, NULL, 0) : 9500ULL) << 20;
+#else
     hos_total_memory = (mb ? strtoull(mb, NULL, 0) : 9809ULL) << 20;
+#endif
 #endif
 }
 

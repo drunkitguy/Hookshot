@@ -815,10 +815,21 @@ HMODULE LoadLibraryA(LPCSTR name) {
            chose, or the device's own with the memory import the renderer needs there) */
         const char *drv = getenv("HOOKSHOT_VK_DRIVER"), *dir = getenv("HOOKSHOT_VK_DRIVER_DIR"), *libs = getenv("HOOKSHOT_NATIVE_LIB_DIR");
         /* (HOS_DRIVER in hookshot_env.txt, for this run only: a .so in the app's driver folder by name, or "system"; the start
-           screen's choice stays as it is. HOS_DEFAULT_DRIVER: the same when neither names one, the system's for now) */
-#define HOS_DEFAULT_DRIVER NULL
+           screen's choice stays as it is. When neither names one, the first of default_drivers in the driver folder, else the
+           system's: Turnip renders the game where Qualcomm's own driver fails ~900 of its pipelines (AYN Thor, cycle 8) */
+        static const char *const default_drivers[] = {"turnip_t30.so", "vulkan.purple.so"};
+        const int chose_system = drv && !strcmp(drv, "system");   /* (the start screen's "Use the system driver") */
+        if (chose_system) drv = NULL;
         const char *pick = getenv("HOS_DRIVER");
-        if (!pick && !(drv && drv[0])) pick = HOS_DEFAULT_DRIVER;
+        int by_default = 0;
+        if (chose_system && !pick) fprintf(stderr, "vk: the start screen chose the system's driver\n");
+        for (size_t i = 0; !pick && !chose_system && !(drv && drv[0]) && dir && i < sizeof default_drivers / sizeof *default_drivers; i++) {
+            char at_path[PATH_MAX];
+            struct stat st;
+            snprintf(at_path, sizeof at_path, "%s%s", dir, default_drivers[i]);
+            if (stat(at_path, &st) == 0 && S_ISREG(st.st_mode)) pick = default_drivers[i], by_default = 1;
+        }
+        if (!pick && !chose_system && !(drv && drv[0])) fprintf(stderr, "vk: no driver chosen and none of the defaults in the driver folder: the system's\n");
         if (pick && pick[0]) {
             char at_path[PATH_MAX];
             snprintf(at_path, sizeof at_path, "%s%s", dir ? dir : "", pick);
@@ -826,7 +837,7 @@ HMODULE LoadLibraryA(LPCSTR name) {
             struct stat st;
             if (!strcmp(pick, "system")) drv = NULL;
             else if (dir && pn > 3 && !strcmp(pick + pn - 3, ".so") && stat(at_path, &st) == 0 && S_ISREG(st.st_mode)) drv = pick;
-            fprintf(stderr, "vk: HOS_DRIVER=%s: %s\n", pick, !strcmp(pick, "system") ? "the system's driver" :
+            fprintf(stderr, "vk: %s%s: %s\n", by_default ? "the default driver " : "HOS_DRIVER=", pick, !strcmp(pick, "system") ? "the system's driver" :
                     drv == pick ? "that driver" : "no such .so in the driver folder, the start screen's choice instead");
         }
         if (drv && drv[0] && dir) {   /* (which file this run's driver is: its size and an FNV-1a hash of its bytes) */

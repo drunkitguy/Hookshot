@@ -58,6 +58,9 @@ static unsigned copies;
 static bool copy_reads_on() { return copy_reads; }
 static constexpr uint64_t kCopyReadMax = 8ull << 20;
 static std::atomic<int64_t> st_copy_reads{0}, st_copy_read_kb{0};
+static std::atomic<int64_t> st_copy_refused[3]{};
+static std::atomic<uint64_t> st_copy_refused_largest{0};
+static void copy_refusals_log() {}
 static constexpr VkBuffer kStreamBuffer = 77;
 static BufferRef stream_copy_guest(uint64_t, uint64_t n) {
     if (!copy_reads) throw std::runtime_error("unexpected copied read");
