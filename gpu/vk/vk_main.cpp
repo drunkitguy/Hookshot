@@ -506,6 +506,16 @@ bool create_device() {
     coopmat_init();
     reflex_device_created();
     antilag_device_created();
+    // (hookshot) not on Qualcomm's own driver: its vkCmdPushDescriptorSetKHR frees a block it writes through after (malloc debug:
+    // used after free), and the next vkResetCommandPool aborted (AYN Thor, Adreno 740). Descriptor sets from the per-recording
+    // pools instead, as where the extension is missing. RX_VK_PUSH_DESCRIPTORS=0 / 1: off / on on any driver that has it
+    if (dev.push_descriptor) {
+        const char* e = getenv("RX_VK_PUSH_DESCRIPTORS");
+        const bool qcom = dev.driver_id == VK_DRIVER_ID_QUALCOMM_PROPRIETARY;
+        dev.push_descriptor = e ? atoi(e) != 0 : !qcom;
+        logf("vk: descriptors %s (%s)", dev.push_descriptor ? "pushed" : "in sets from the recordings' pools",
+             e ? "RX_VK_PUSH_DESCRIPTORS" : qcom ? "Qualcomm's own driver: its push descriptors write freed memory" : "VK_KHR_push_descriptor");
+    }
     if (dev.push_descriptor) {
         VkPhysicalDevicePushDescriptorPropertiesKHR pp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PUSH_DESCRIPTOR_PROPERTIES_KHR};
         VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
