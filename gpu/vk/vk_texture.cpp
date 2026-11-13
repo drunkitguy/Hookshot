@@ -3886,6 +3886,44 @@ void texture_frame(uint64_t completed) {
     // last 8 presents used, nothing recorded work may still read.
     static uint64_t own = 0;
     if (frame_no % 10) return;
+    {   // (what the textures' memory is, by kind, by what the allocator gave each, with the staging and VMA's memory types: which of
+        // them could be GBs. Every RX_VK_TEX_LOG_S seconds: 30 on Android, which must stay under ~8 GB in all; 0 (off) elsewhere)
+#ifdef __ANDROID__
+        static const int64_t every_s = getenv("RX_VK_TEX_LOG_S") ? atoll(getenv("RX_VK_TEX_LOG_S")) : 30;
+#else
+        static const int64_t every_s = getenv("RX_VK_TEX_LOG_S") ? atoll(getenv("RX_VK_TEX_LOG_S")) : 0;
+#endif
+        static auto last = std::chrono::steady_clock::now();
+        if (every_s > 0 && std::chrono::steady_clock::now() - last >= std::chrono::seconds(every_s)) {
+            last = std::chrono::steady_clock::now();
+            // (native ASTC, BC, sampled only, of it RGBA8 / BGRA8 2D (what a re-encode would take), render targets and depth, written by
+            // the GPU's copies or storage alone)
+            uint64_t b[6]{};
+            size_t n[6]{};
+            for (auto& kv : textures) {
+                const Texture* t = kv.second.get();
+                const int k = is_astc(t->format) ? 0 : is_bc(t->format) ? 1
+                            : t->first_render_frame || is_depth_format(t->format) ? 4 : t->gpu_written ? 5 : 2;
+                b[k] += t->bytes + t->pad, n[k]++;
+                if (k == 2 && (t->format == VK_FORMAT_R8G8B8A8_UNORM || t->format == VK_FORMAT_B8G8R8A8_UNORM) &&
+                    t->type == VK_IMAGE_TYPE_2D && !t->sparse && t->samples == VK_SAMPLE_COUNT_1_BIT)
+                    b[3] += t->bytes + t->pad, n[3]++;
+            }
+            uint64_t staged = 0, pooled = 0;
+            for (const Arena& a : arenas) staged += a.size;
+            {
+                std::lock_guard lk(pool_mu);
+                pooled = pool_bytes;
+            }
+            logf("vk: texture memory: native ASTC %llu MB (%zu), BC %llu MB (%zu), sampled only %llu MB (%zu; RGBA8/BGRA8 2D %llu MB "
+                 "of it, %zu), render targets and depth %llu MB (%zu), GPU-copied or stored %llu MB (%zu); render target pool %llu MB; "
+                 "staging %llu MB in %zu arenas", (unsigned long long)(b[0] >> 20), n[0], (unsigned long long)(b[1] >> 20), n[1],
+                 (unsigned long long)(b[2] >> 20), n[2], (unsigned long long)(b[3] >> 20), n[3], (unsigned long long)(b[4] >> 20), n[4],
+                 (unsigned long long)(b[5] >> 20), n[5], (unsigned long long)(pooled >> 20), (unsigned long long)(staged >> 20),
+                 arenas.size());
+            vma_log_types();
+        }
+    }
     uint64_t used = 0, allowed = 0, block_free = 0;
     const bool known = vram_usage(&used, &allowed, &block_free);
     if (!own)   // (RX_VK_VRAM_MB, else 70% of what the driver allows the process at the first look)

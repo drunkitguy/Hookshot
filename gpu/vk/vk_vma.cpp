@@ -310,6 +310,25 @@ void vma_log_image_blocks() {
              (unsigned long long)(d.unusedRangeSizeMax >> 20));
     }
 }
+/// (every memory type VMA holds memory in: its blocks and what is allocated in them. On a phone the one heap holds both the
+/// images (device only) and the mapped buffers (staging, streams, captures): the types tell them apart)
+void vma_log_types() {
+    VmaTotalStatistics s{};
+    vmaCalculateStatistics(vma, &s);
+    char line[1024];
+    int n = snprintf(line, sizeof line, "vk: memory types: %llu MB in blocks, %llu MB allocated;",
+                     (unsigned long long)(s.total.statistics.blockBytes >> 20), (unsigned long long)(s.total.statistics.allocationBytes >> 20));
+    for (uint32_t i = 0; i < dev.memory.memoryTypeCount && n < 900; i++) {
+        const VmaStatistics& t = s.memoryType[i].statistics;
+        const VkMemoryPropertyFlags f = dev.memory.memoryTypes[i].propertyFlags;
+        if (t.blockBytes)
+            n += snprintf(line + n, sizeof line - n, " type %u (%s%s%s): %u blocks %llu MB, %llu MB allocated;", i,
+                          (f & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT) ? "device" : "system",
+                          (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ? " mapped" : "", (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) ? " cached" : "",
+                          t.blockCount, (unsigned long long)(t.blockBytes >> 20), (unsigned long long)(t.allocationBytes >> 20));
+    }
+    logf("%s", line);
+}
 void vma_log_heaps() {
     VmaBudget b[VK_MAX_MEMORY_HEAPS]{};
     vmaGetHeapBudgets(vma, b);

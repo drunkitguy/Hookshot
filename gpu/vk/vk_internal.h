@@ -304,6 +304,7 @@ bool vram_usage(uint64_t* used, uint64_t* budget, uint64_t* block_free = nullptr
 bool vram_usage_now(uint64_t* used, uint64_t* budget);
 void vma_log_heaps();
 void vma_log_image_blocks();   // (the image pools' blocks: what they hold, and their free ranges)
+void vma_log_types();          // (each memory type's blocks and allocations: images apart from mapped buffers)
 PFN_vkGetInstanceProcAddr instance_proc();   // vk_main.cpp
 
 bool create_swapchain(uint32_t width, uint32_t height);

@@ -491,12 +491,14 @@ bool create_device() {
             const uint32_t v = p2.properties.driverVersion, a = p2.properties.apiVersion;
             const bool qcom = drv.driverID == VK_DRIVER_ID_QUALCOMM_PROPRIETARY;   // (Qualcomm's: 10.22 bits; Mesa's: Vulkan's form)
             logf("vk: driver id %d, %s (%s), conformance %u.%u.%u.%u, driver version %u.%u.%u (%#x), Vulkan %u.%u.%u; shaderInt64 %d, "
-                 "shaderFloat16 %d, storageBuffer16BitAccess %d, bufferDeviceAddress %d, VK_EXT_external_memory_host %d",
+                 "shaderFloat16 %d, storageBuffer16BitAccess %d, bufferDeviceAddress %d, VK_EXT_external_memory_host %d, "
+                 "textureCompressionBC %d, textureCompressionASTC_LDR %d, sparseResidencyImage2D %d",
                  (int)drv.driverID, drv.driverName, drv.driverInfo, drv.conformanceVersion.major, drv.conformanceVersion.minor,
                  drv.conformanceVersion.subminor, drv.conformanceVersion.patch, qcom ? v >> 22 : VK_API_VERSION_MAJOR(v),
                  qcom ? (v >> 12) & 0x3ff : VK_API_VERSION_MINOR(v), qcom ? v & 0xfff : VK_API_VERSION_PATCH(v), v,
                  VK_API_VERSION_MAJOR(a), VK_API_VERSION_MINOR(a), VK_API_VERSION_PATCH(a), (int)f.features.shaderInt64,
-                 (int)f12.shaderFloat16, (int)f11.storageBuffer16BitAccess, (int)f12.bufferDeviceAddress, (int)dev.external_memory_host);
+                 (int)f12.shaderFloat16, (int)f11.storageBuffer16BitAccess, (int)f12.bufferDeviceAddress, (int)dev.external_memory_host,
+                 (int)f.features.textureCompressionBC, (int)f.features.textureCompressionASTC_LDR, (int)f.features.sparseResidencyImage2D);
         }
 #endif
     }
